@@ -1,0 +1,34 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.uv-cache/
+.venv/
+.env
+.env.*
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+dist/
+pnpm-debug.log*
+
+# IDE
+.vscode/
+.idea/
+
+# Local data artifacts
+data/raw/*
+data/synthetic/*
+data/eval/*
+
+# Keep data directories
+!data/raw/.gitkeep
+!data/synthetic/.gitkeep
+!data/eval/.gitkeep
