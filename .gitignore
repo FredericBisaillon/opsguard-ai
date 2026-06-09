@@ -7,6 +7,9 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
 .uv-cache/
 .venv/
 .env
@@ -19,6 +22,11 @@ node_modules/
 out/
 dist/
 pnpm-debug.log*
+
+# Local runtime artifacts
+*.log
+*.sqlite
+*.sqlite3
 
 # IDE
 .vscode/
