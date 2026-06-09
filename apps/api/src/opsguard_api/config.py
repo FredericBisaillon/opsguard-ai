@@ -10,6 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[4]
 class Settings(BaseSettings):
     database_url: str
     upload_dir: Path = PROJECT_ROOT / "data" / "uploads"
+    extracted_text_dir: Path = PROJECT_ROOT / "data" / "extracted"
     max_upload_size_mb: int = Field(default=10, gt=0)
 
     @property

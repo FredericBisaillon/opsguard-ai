@@ -2,7 +2,7 @@
 
 OpsGuard AI est une plateforme de revue documentaire IA sécurisée, construite progressivement comme projet portfolio backend/IA. Le but est de démontrer une architecture web maintenable, testable et orientée sécurité pour l'ingestion, la recherche et la revue de documents sensibles.
 
-Le projet ne fait pas encore de RAG ni d'analyse IA. Le bloc actuel stabilise une base saine: API FastAPI, upload local minimal de documents, validation Pydantic, persistance PostgreSQL, documentation et tests de base.
+Le projet ne fait pas encore de RAG ni d'analyse IA. Le bloc actuel stabilise une base saine: API FastAPI, upload local de documents, extraction de texte minimale, validation Pydantic, persistance PostgreSQL, documentation et tests de base.
 
 ## État actuel
 
@@ -13,19 +13,19 @@ Ce qui existe aujourd'hui:
 - un modèle `Document` SQLAlchemy;
 - des schemas Pydantic pour créer et lire des documents;
 - `POST /documents` pour créer une entrée documentaire;
-- `POST /documents/upload` pour téléverser un PDF ou un Markdown localement;
+- `POST /documents/upload` pour téléverser un PDF, Markdown ou texte brut localement;
+- `POST /documents/{document_id}/extract-text` pour extraire le texte d'un document uploadé;
 - `GET /documents` pour lister les documents;
-- une configuration locale de dossier d'upload et taille maximale;
+- une configuration locale de dossier d'upload, dossier d'extraction et taille maximale;
 - une base PostgreSQL locale lancée avec Docker Compose;
 - l'image PostgreSQL `pgvector/pgvector:pg16`;
 - l'extension `vector` activée au démarrage de l'API;
 - un frontend Next.js minimal;
-- des tests pytest pour `/health` et le workflow create/list documents.
+- des tests pytest pour `/health`, les documents, l'upload et l'extraction.
 
 Ce qui n'existe pas encore:
 
-- parsing PDF ou Markdown;
-- extraction de texte;
+- OCR pour les PDF scannés;
 - chunking;
 - embeddings;
 - colonnes vectorielles ou recherche sémantique;
@@ -44,6 +44,7 @@ Ce qui n'existe pas encore:
 - SQLAlchemy
 - Pydantic
 - pydantic-settings
+- pypdf
 - psycopg
 - PostgreSQL
 - pgvector
@@ -123,11 +124,12 @@ POSTGRES_PORT=5432
 DATABASE_URL=postgresql+psycopg://opsguard:change-me-local-only@localhost:5432/opsguard_ai
 
 UPLOAD_DIR=data/uploads
+EXTRACTED_TEXT_DIR=data/extracted
 MAX_UPLOAD_SIZE_MB=10
 ```
 
 Ne commit jamais de vrais secrets dans `.env`. Le fichier `.env.example` sert uniquement de modèle local.
-Les fichiers téléversés sont sauvegardés localement dans `UPLOAD_DIR`. Les fichiers générés dans `data/uploads/` sont ignorés par Git.
+Les fichiers téléversés sont sauvegardés localement dans `UPLOAD_DIR`. Les textes extraits sont sauvegardés dans `EXTRACTED_TEXT_DIR`. Les fichiers générés dans `data/uploads/` et `data/extracted/` sont ignorés par Git.
 
 ## Lancer PostgreSQL
 
@@ -233,7 +235,7 @@ Réponse exemple:
 
 ### `POST /documents/upload`
 
-Téléverse un fichier PDF ou Markdown, le sauvegarde dans un dossier local contrôlé, puis crée une entrée documentaire avec `source_type = "uploaded_file"` et `status = "uploaded"`.
+Téléverse un fichier PDF, Markdown ou texte brut, le sauvegarde dans un dossier local contrôlé, puis crée une entrée documentaire avec `source_type = "uploaded_file"` et `status = "uploaded"`.
 
 Form-data:
 
@@ -243,7 +245,8 @@ Form-data:
 Types acceptés:
 
 - `.pdf` avec `application/pdf`;
-- `.md` avec `text/markdown` ou `text/plain`.
+- `.md` avec `text/markdown` ou `text/plain`;
+- `.txt` avec `text/plain`.
 
 Réponse exemple:
 
@@ -258,6 +261,24 @@ Réponse exemple:
   "updated_at": "2026-06-09T12:05:00Z"
 }
 ```
+
+### `POST /documents/{document_id}/extract-text`
+
+Extrait le texte d'un document uploadé depuis son `source_path` déjà enregistré en base. Le backend ne prend pas de chemin client arbitraire, vérifie que le fichier source est dans `UPLOAD_DIR`, puis sauvegarde le texte extrait dans `EXTRACTED_TEXT_DIR`.
+
+Réponse exemple:
+
+```json
+{
+  "document_id": 2,
+  "status": "text_extracted",
+  "extracted_text_path": "data/extracted/document-2.txt",
+  "character_count": 1284,
+  "message": "Text extracted successfully."
+}
+```
+
+L'extraction supporte Markdown, texte brut et PDF avec texte extractible via `pypdf`. Il n'y a pas d'OCR, de chunking, d'embeddings ou d'appel LLM dans ce bloc.
 
 ### `GET /documents`
 

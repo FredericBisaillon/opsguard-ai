@@ -7,4 +7,5 @@ Minimal FastAPI backend for OpsGuard AI.
 - `GET /health` returns `{"status": "ok"}`.
 - `POST /documents` creates a document row.
 - `GET /documents` lists document rows.
-- `POST /documents/upload` accepts a PDF or Markdown file, stores it locally, and creates a document row with status `uploaded`.
+- `POST /documents/upload` accepts a PDF, Markdown, or plain text file, stores it locally, and creates a document row with status `uploaded`.
+- `POST /documents/{document_id}/extract-text` extracts text from an uploaded PDF, Markdown, or plain text file, stores the extracted text locally, and updates the document status.

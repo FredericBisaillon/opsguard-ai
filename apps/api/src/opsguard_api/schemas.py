@@ -21,3 +21,13 @@ class DocumentRead(BaseModel):
     status: DocumentStatus
     created_at: datetime
     updated_at: datetime
+
+
+class DocumentExtractionRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    document_id: int
+    status: DocumentStatus
+    extracted_text_path: str
+    character_count: int
+    message: str

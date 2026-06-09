@@ -1,6 +1,6 @@
 # Scénarios de démo actuels
 
-Ce document décrit les démonstrations possibles avec l'état actuel d'OpsGuard AI. Il couvre l'API de base et l'upload local minimal. Il ne couvre pas encore de parsing, d'embeddings, de RAG ou d'authentification.
+Ce document décrit les démonstrations possibles avec l'état actuel d'OpsGuard AI. Il couvre l'API de base, l'upload local minimal et l'extraction de texte. Il ne couvre pas encore de chunking, d'embeddings, de RAG ou d'authentification.
 
 ## Scénario 1: vérifier que l'API et la base locale fonctionnent
 
@@ -75,7 +75,7 @@ Résultat attendu:
 
 ## Scénario 2: téléverser un document local
 
-Objectif: montrer que le backend reçoit un fichier PDF ou Markdown, le sauvegarde localement et crée une entrée `Document`.
+Objectif: montrer que le backend reçoit un fichier PDF, Markdown ou texte brut, le sauvegarde localement, crée une entrée `Document`, puis extrait son texte sans appel IA.
 
 ### 1. Téléverser un Markdown
 
@@ -99,10 +99,26 @@ Résultat attendu:
 - `source_type` vaut `uploaded_file`;
 - `status` vaut `uploaded`;
 - `source_path` pointe vers un fichier dans `data/uploads/`;
-- aucun parsing, chunking ou embedding n'est lancé.
+- aucun chunking ou embedding n'est lancé.
+
+### 2. Extraire le texte du document
+
+Utiliser l'`id` retourné par l'upload:
+
+```bash
+curl -X POST http://127.0.0.1:8000/documents/2/extract-text
+```
+
+Résultat attendu:
+
+- statut HTTP `200`;
+- `status` vaut `text_extracted`;
+- `extracted_text_path` pointe vers un fichier dans `data/extracted/`;
+- `character_count` contient le nombre de caractères extraits;
+- aucun chunking, embedding, RAG ou appel LLM n'est lancé.
 
 ## Message d'entrevue possible
 
-À ce stade, le projet démontre une base backend propre: validation d'entrée avec Pydantic, séparation routes/services, upload local contrôlé, persistance SQLAlchemy, PostgreSQL local dans Docker et tests automatisés.
+À ce stade, le projet démontre une base backend propre: validation d'entrée avec Pydantic, séparation routes/services/helpers, upload local contrôlé, extraction de texte minimale, persistance SQLAlchemy, PostgreSQL local dans Docker et tests automatisés.
 
-L'IA n'est pas encore intégrée. C'est volontaire: le projet construit d'abord une fondation fiable avant d'ajouter l'ingestion documentaire, les embeddings et le RAG.
+L'IA n'est pas encore intégrée. C'est volontaire: le projet construit d'abord une fondation fiable avant d'ajouter le chunking, les embeddings et le RAG.

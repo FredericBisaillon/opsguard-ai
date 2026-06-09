@@ -1,8 +1,8 @@
 # Architecture actuelle
 
-Ce document décrit l'architecture actuelle d'OpsGuard AI. Il reflète l'état réel du projet à ce stade: API FastAPI, upload local minimal, validation Pydantic, persistance PostgreSQL et frontend Next.js minimal.
+Ce document décrit l'architecture actuelle d'OpsGuard AI. Il reflète l'état réel du projet à ce stade: API FastAPI, upload local minimal, extraction de texte locale, validation Pydantic, persistance PostgreSQL et frontend Next.js minimal.
 
-OpsGuard AI ne fait pas encore de parsing de documents, d'embeddings, de recherche sémantique, de RAG, d'authentification ou de multi-tenant.
+OpsGuard AI ne fait pas encore d'OCR, de chunking, d'embeddings, de recherche sémantique, de RAG, d'authentification ou de multi-tenant.
 
 ## 1. Vue d'ensemble
 
@@ -20,6 +20,7 @@ Le backend expose actuellement une API HTTP simple:
 - `GET /health`
 - `POST /documents`
 - `POST /documents/upload`
+- `POST /documents/{document_id}/extract-text`
 - `GET /documents`
 
 La base de données locale est PostgreSQL dans Docker. L'image utilisée inclut pgvector afin de préparer les prochaines étapes liées aux embeddings, même si aucun embedding n'est encore stocké.
@@ -48,6 +49,7 @@ Technologies:
 - pydantic-settings pour la configuration;
 - SQLAlchemy pour l'accès relationnel;
 - psycopg comme driver PostgreSQL;
+- pypdf pour l'extraction de texte PDF sans OCR;
 - pytest, ruff et mypy pour la qualité.
 
 L'application FastAPI est définie dans `opsguard_api.main`. Au démarrage, son lifespan appelle `init_database()`, qui prépare temporairement la base locale.
@@ -74,6 +76,14 @@ Les schemas Pydantic sont définis dans `opsguard_api.schemas`.
 
 `DocumentRead` utilise `from_attributes=True`, ce qui permet à FastAPI/Pydantic de produire une réponse à partir d'un objet SQLAlchemy.
 
+`DocumentExtractionRead` définit la réponse de l'extraction de texte:
+
+- `document_id`;
+- `status`;
+- `extracted_text_path`;
+- `character_count`;
+- `message`.
+
 ## 5. Routes vs services
 
 Les routes sont responsables de la couche HTTP:
@@ -89,7 +99,10 @@ Les services contiennent la logique applicative simple:
 - créer un document;
 - lister les documents;
 - valider et sauvegarder un upload documentaire minimal;
+- orchestrer l'extraction de texte et les changements de statut;
 - gérer les opérations SQLAlchemy nécessaires.
+
+La lecture concrète des fichiers est isolée dans `opsguard_api.services.extraction`, afin de garder la logique `.md`, `.txt` et `.pdf` hors de la route HTTP.
 
 Cette séparation garde les routes minces et rend la logique métier plus facile à tester et à faire évoluer.
 
@@ -183,9 +196,33 @@ Client
 -> réponse HTTP 201
 ```
 
-Cette route accepte seulement les PDF et Markdown. Elle limite la taille via `MAX_UPLOAD_SIZE_MB`, refuse les fichiers vides, ne fait pas confiance au nom client pour le chemin final, et ne déclenche pas encore de parsing, chunking ou embedding.
+Cette route accepte les PDF, Markdown et texte brut. Elle limite la taille via `MAX_UPLOAD_SIZE_MB`, refuse les fichiers vides, ne fait pas confiance au nom client pour le chemin final, et ne déclenche pas encore de chunking ou embedding.
 
-## 10. Flow complet de `GET /documents`
+## 10. Flow complet de `POST /documents/{document_id}/extract-text`
+
+Flux actuel:
+
+```text
+Client
+-> POST /documents/{document_id}/extract-text
+-> FastAPI route extract_document_text
+-> injection d'une session SQLAlchemy via get_db
+-> lecture de Settings via get_settings
+-> appel du service documents_service.extract_document_text
+-> récupération du Document par id
+-> validation du source_path déjà stocké en base
+-> vérification que le fichier est dans UPLOAD_DIR
+-> appel du helper services.extraction.extract_text
+-> lecture UTF-8 pour .md/.txt ou extraction pypdf pour .pdf
+-> sauvegarde du texte dans EXTRACTED_TEXT_DIR
+-> mise à jour du status à text_extracted
+-> sérialisation avec DocumentExtractionRead
+-> réponse HTTP 200
+```
+
+En cas d'échec après récupération du document, le statut passe à `extraction_failed`. L'endpoint retourne `404` si le document ou son fichier source n'existe pas, et `400` si le type ou le contenu ne permet pas d'extraire du texte.
+
+## 11. Flow complet de `GET /documents`
 
 Flux actuel:
 
@@ -204,7 +241,7 @@ Client
 
 Cette route expose les documents existants en base, sans pagination ni filtres pour l'instant.
 
-## 11. Limites actuelles
+## 12. Limites actuelles
 
 Limites connues:
 
@@ -212,20 +249,19 @@ Limites connues:
 - il n'y a pas encore de migrations Alembic;
 - les tests utilisent la base configurée par `DATABASE_URL`;
 - il n'y a pas encore d'isolation de données par utilisateur ou tenant;
-- il n'y a pas de parsing documentaire;
+- il n'y a pas d'OCR pour les PDF scannés;
 - il n'y a pas de chunks, embeddings ou recherche vectorielle;
 - il n'y a pas de couche IA;
 - il n'y a pas encore de gestion d'erreurs avancée, pagination ou observabilité.
 
-## 12. Prochaines étapes
+## 13. Prochaines étapes
 
 Prochaines évolutions techniques recommandées:
 
 1. Introduire Alembic avant de complexifier le schéma.
-2. Ajouter l'extraction de texte.
-3. Introduire une table de chunks.
-4. Générer et stocker des embeddings avec pgvector.
-5. Construire une recherche sémantique.
-6. Ajouter des réponses avec citations.
-7. Ajouter auth, rôles et isolation tenant.
-8. Ajouter des évaluations et une CI plus complète.
+2. Introduire une table de chunks.
+3. Générer et stocker des embeddings avec pgvector.
+4. Construire une recherche sémantique.
+5. Ajouter des réponses avec citations.
+6. Ajouter auth, rôles et isolation tenant.
+7. Ajouter des évaluations et une CI plus complète.

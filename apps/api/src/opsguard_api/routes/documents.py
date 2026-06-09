@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from opsguard_api.config import Settings, get_settings
 from opsguard_api.db import get_db
 from opsguard_api.models import Document
-from opsguard_api.schemas import DocumentCreate, DocumentRead
+from opsguard_api.schemas import DocumentCreate, DocumentExtractionRead, DocumentRead
 from opsguard_api.services import documents as documents_service
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -45,3 +45,22 @@ def upload_document(
 @router.get("", response_model=list[DocumentRead])
 def list_documents(db: Session = Depends(get_db)) -> list[Document]:
     return documents_service.list_documents(db)
+
+
+@router.post(
+    "/{document_id}/extract-text",
+    response_model=DocumentExtractionRead,
+)
+def extract_document_text(
+    document_id: int,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> documents_service.DocumentExtractionResult:
+    try:
+        return documents_service.extract_document_text(
+            db=db,
+            document_id=document_id,
+            settings=settings,
+        )
+    except documents_service.DocumentTextExtractionError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc

@@ -34,12 +34,14 @@ pnpm-debug.log*
 
 # Local data artifacts
 data/raw/*
+data/extracted/*
 data/uploads/*
 data/synthetic/*
 data/eval/*
 
 # Keep data directories
 !data/raw/.gitkeep
+!data/extracted/.gitkeep
 !data/uploads/.gitkeep
 !data/synthetic/.gitkeep
 !data/eval/.gitkeep

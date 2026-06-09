@@ -9,6 +9,9 @@ from opsguard_api.db import Base
 
 class DocumentStatus(StrEnum):
     UPLOADED = "uploaded"
+    EXTRACTING = "extracting"
+    TEXT_EXTRACTED = "text_extracted"
+    EXTRACTION_FAILED = "extraction_failed"
     PENDING = "pending"
     PROCESSED = "processed"
     FAILED = "failed"
