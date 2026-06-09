@@ -2,7 +2,7 @@
 
 OpsGuard AI est une plateforme de revue documentaire IA sécurisée, construite progressivement comme projet portfolio backend/IA. Le but est de démontrer une architecture web maintenable, testable et orientée sécurité pour l'ingestion, la recherche et la revue de documents sensibles.
 
-Le projet ne fait pas encore de RAG ni d'analyse IA. Le bloc actuel stabilise une base saine: API FastAPI, upload local de documents, extraction de texte minimale, validation Pydantic, persistance PostgreSQL, documentation et tests de base.
+Le projet ne fait pas encore de RAG ni d'analyse IA. Le bloc actuel stabilise une base saine: API FastAPI, upload local de documents, extraction de texte minimale, chunking structure-aware, validation Pydantic, persistance PostgreSQL, documentation et tests de base.
 
 ## État actuel
 
@@ -11,12 +11,15 @@ Ce qui existe aujourd'hui:
 - un monorepo avec `apps/api` et `apps/web`;
 - une API FastAPI avec `GET /health`;
 - un modèle `Document` SQLAlchemy;
+- un modèle `DocumentChunk` SQLAlchemy;
 - des schemas Pydantic pour créer et lire des documents;
 - `POST /documents` pour créer une entrée documentaire;
 - `POST /documents/upload` pour téléverser un PDF, Markdown ou texte brut localement;
 - `POST /documents/{document_id}/extract-text` pour extraire le texte d'un document uploadé;
+- `POST /documents/{document_id}/chunk` pour découper le texte extrait en chunks;
+- `GET /documents/{document_id}/chunks` pour inspecter les chunks d'un document;
 - `GET /documents` pour lister les documents;
-- une configuration locale de dossier d'upload, dossier d'extraction et taille maximale;
+- une configuration locale de dossier d'upload, dossier d'extraction, taille maximale et limites de chunking;
 - une base PostgreSQL locale lancée avec Docker Compose;
 - l'image PostgreSQL `pgvector/pgvector:pg16`;
 - l'extension `vector` activée au démarrage de l'API;
@@ -26,7 +29,6 @@ Ce qui existe aujourd'hui:
 Ce qui n'existe pas encore:
 
 - OCR pour les PDF scannés;
-- chunking;
 - embeddings;
 - colonnes vectorielles ou recherche sémantique;
 - RAG ou réponses avec citations;
@@ -126,10 +128,13 @@ DATABASE_URL=postgresql+psycopg://opsguard:change-me-local-only@localhost:5432/o
 UPLOAD_DIR=data/uploads
 EXTRACTED_TEXT_DIR=data/extracted
 MAX_UPLOAD_SIZE_MB=10
+CHUNK_MAX_CHARS=1200
+CHUNK_OVERLAP_CHARS=150
 ```
 
 Ne commit jamais de vrais secrets dans `.env`. Le fichier `.env.example` sert uniquement de modèle local.
 Les fichiers téléversés sont sauvegardés localement dans `UPLOAD_DIR`. Les textes extraits sont sauvegardés dans `EXTRACTED_TEXT_DIR`. Les fichiers générés dans `data/uploads/` et `data/extracted/` sont ignorés par Git.
+`CHUNK_MAX_CHARS` et `CHUNK_OVERLAP_CHARS` contrôlent la taille des chunks créés depuis le texte extrait. L'overlap est surtout utilisé lorsque le backend doit couper un bloc trop long.
 
 ## Lancer PostgreSQL
 
@@ -278,7 +283,48 @@ Réponse exemple:
 }
 ```
 
-L'extraction supporte Markdown, texte brut et PDF avec texte extractible via `pypdf`. Il n'y a pas d'OCR, de chunking, d'embeddings ou d'appel LLM dans ce bloc.
+L'extraction supporte Markdown, texte brut et PDF avec texte extractible via `pypdf`. Il n'y a pas d'OCR, d'embeddings ou d'appel LLM dans ce bloc.
+
+### `POST /documents/{document_id}/chunk`
+
+Découpe le texte extrait d'un document en chunks structure-aware. Le document doit déjà avoir un texte extrait. Le backend relit le fichier contrôlé `EXTRACTED_TEXT_DIR/document-{document_id}.txt`, détecte les sections simples, regroupe les blocs logiques, supprime les anciens chunks du document, puis recrée une liste ordonnée de chunks.
+
+Réponse exemple:
+
+```json
+{
+  "document_id": 2,
+  "status": "chunked",
+  "chunk_count": 4,
+  "chunk_max_chars": 1200,
+  "chunk_overlap_chars": 150,
+  "message": "Document chunked successfully."
+}
+```
+
+En cas de succès, le statut du document passe à `chunked`. En cas d'échec après le début du chunking, il passe à `chunking_failed`.
+
+### `GET /documents/{document_id}/chunks`
+
+Retourne les chunks persistés d'un document, ordonnés par `chunk_index`. Cet endpoint sert surtout au debug et aux tests tant que l'interface documentaire complète n'existe pas encore.
+
+Réponse exemple:
+
+```json
+[
+  {
+    "id": 1,
+    "document_id": 2,
+    "chunk_index": 0,
+    "content": "Section: Security Policy\n\nAccess is reviewed quarterly.",
+    "character_count": 62,
+    "section_title": "Security Policy",
+    "start_char": 19,
+    "end_char": 50,
+    "created_at": "2026-06-09T12:10:00Z"
+  }
+]
+```
 
 ### `GET /documents`
 
@@ -305,8 +351,6 @@ Réponse exemple:
 Prochains blocs prévus:
 
 1. Remplacer `create_all()` par Alembic avant de complexifier le schéma.
-2. Extraire le texte des fichiers supportés.
-3. Introduire le chunking et le stockage des chunks.
-4. Ajouter les embeddings et une première recherche sémantique avec pgvector.
-5. Construire une réponse avec citations.
-6. Ajouter les premières tâches de revue et les contrôles de sécurité.
+2. Ajouter les embeddings et une première recherche sémantique avec pgvector.
+3. Construire une réponse avec citations.
+4. Ajouter les premières tâches de revue et les contrôles de sécurité.

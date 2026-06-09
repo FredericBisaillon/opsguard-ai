@@ -31,3 +31,26 @@ class DocumentExtractionRead(BaseModel):
     extracted_text_path: str
     character_count: int
     message: str
+
+
+class DocumentChunkingRead(BaseModel):
+    document_id: int
+    status: DocumentStatus
+    chunk_count: int
+    chunk_max_chars: int
+    chunk_overlap_chars: int
+    message: str
+
+
+class DocumentChunkRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    document_id: int
+    chunk_index: int
+    content: str
+    character_count: int
+    section_title: str | None
+    start_char: int | None
+    end_char: int | None
+    created_at: datetime

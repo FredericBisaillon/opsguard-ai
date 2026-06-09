@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     upload_dir: Path = PROJECT_ROOT / "data" / "uploads"
     extracted_text_dir: Path = PROJECT_ROOT / "data" / "extracted"
     max_upload_size_mb: int = Field(default=10, gt=0)
+    chunk_max_chars: int = Field(default=1200, gt=0)
+    chunk_overlap_chars: int = Field(default=150, ge=0)
 
     @property
     def max_upload_size_bytes(self) -> int:

@@ -1,8 +1,16 @@
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import DateTime, Integer, String, Text, func
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from opsguard_api.db import Base
 
@@ -12,6 +20,9 @@ class DocumentStatus(StrEnum):
     EXTRACTING = "extracting"
     TEXT_EXTRACTED = "text_extracted"
     EXTRACTION_FAILED = "extraction_failed"
+    CHUNKING = "chunking"
+    CHUNKED = "chunked"
+    CHUNKING_FAILED = "chunking_failed"
     PENDING = "pending"
     PROCESSED = "processed"
     FAILED = "failed"
@@ -40,3 +51,39 @@ class Document(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
+    chunks: Mapped[list["DocumentChunk"]] = relationship(
+        back_populates="document",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="DocumentChunk.chunk_index",
+    )
+
+
+class DocumentChunk(Base):
+    __tablename__ = "document_chunks"
+    __table_args__ = (
+        UniqueConstraint(
+            "document_id",
+            "chunk_index",
+            name="uq_document_chunks_document_id_chunk_index",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    document_id: Mapped[int] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    character_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    section_title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    start_char: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    end_char: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    document: Mapped[Document] = relationship(back_populates="chunks")

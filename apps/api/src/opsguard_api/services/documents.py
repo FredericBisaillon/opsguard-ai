@@ -3,11 +3,11 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import UploadFile
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from opsguard_api.config import PROJECT_ROOT, Settings
-from opsguard_api.models import Document, DocumentStatus
+from opsguard_api.models import Document, DocumentChunk, DocumentStatus
 from opsguard_api.schemas import DocumentCreate
 
 CHUNK_SIZE_BYTES = 1024 * 1024
@@ -34,6 +34,13 @@ class DocumentTextExtractionError(Exception):
         self.status_code = status_code
 
 
+class DocumentChunkingError(Exception):
+    def __init__(self, message: str, status_code: int = 400) -> None:
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+
+
 @dataclass(frozen=True)
 class SavedUpload:
     absolute_path: Path
@@ -52,6 +59,16 @@ class DocumentExtractionResult:
     status: str
     extracted_text_path: str
     character_count: int
+    message: str
+
+
+@dataclass(frozen=True)
+class DocumentChunkingResult:
+    document_id: int
+    status: str
+    chunk_count: int
+    chunk_max_chars: int
+    chunk_overlap_chars: int
     message: str
 
 
@@ -135,6 +152,102 @@ def extract_document_text(
     except TextExtractionError as exc:
         _update_document_status(db, document, DocumentStatus.EXTRACTION_FAILED)
         raise DocumentTextExtractionError(exc.message) from exc
+
+
+def chunk_document(
+    db: Session,
+    document_id: int,
+    settings: Settings,
+) -> DocumentChunkingResult:
+    from opsguard_api.services.chunking import chunk_text
+
+    document = db.get(Document, document_id)
+    if document is None:
+        raise DocumentChunkingError("Document not found.", status_code=404)
+
+    if document.status not in {
+        DocumentStatus.TEXT_EXTRACTED.value,
+        DocumentStatus.CHUNKED.value,
+        DocumentStatus.CHUNKING_FAILED.value,
+    }:
+        raise DocumentChunkingError(
+            "Document text must be extracted before chunking.",
+            status_code=409,
+        )
+
+    try:
+        _validate_chunking_settings(settings)
+        extracted_text_path = _resolved_extracted_text_path(document.id, settings)
+        _update_document_status(db, document, DocumentStatus.CHUNKING)
+
+        try:
+            extracted_text = extracted_text_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise DocumentChunkingError(
+                "Failed to read extracted text.",
+                status_code=500,
+            ) from exc
+
+        if not extracted_text.strip():
+            raise DocumentChunkingError("Extracted text is empty.")
+
+        text_chunks = chunk_text(
+            text=extracted_text,
+            max_chars=settings.chunk_max_chars,
+            overlap_chars=settings.chunk_overlap_chars,
+        )
+        if not text_chunks:
+            raise DocumentChunkingError("Extracted text did not produce any chunks.")
+
+        db.execute(
+            delete(DocumentChunk).where(DocumentChunk.document_id == document.id)
+        )
+        db.add_all(
+            [
+                DocumentChunk(
+                    document_id=document.id,
+                    chunk_index=text_chunk.chunk_index,
+                    content=text_chunk.content,
+                    character_count=text_chunk.character_count,
+                    section_title=text_chunk.section_title,
+                    start_char=text_chunk.start_char,
+                    end_char=text_chunk.end_char,
+                )
+                for text_chunk in text_chunks
+            ]
+        )
+        document.status = DocumentStatus.CHUNKED.value
+        db.add(document)
+        db.commit()
+        db.refresh(document)
+
+        return DocumentChunkingResult(
+            document_id=document.id,
+            status=DocumentStatus.CHUNKED.value,
+            chunk_count=len(text_chunks),
+            chunk_max_chars=settings.chunk_max_chars,
+            chunk_overlap_chars=settings.chunk_overlap_chars,
+            message="Document chunked successfully.",
+        )
+    except DocumentChunkingError:
+        _update_document_status(db, document, DocumentStatus.CHUNKING_FAILED)
+        raise
+    except ValueError as exc:
+        _update_document_status(db, document, DocumentStatus.CHUNKING_FAILED)
+        raise DocumentChunkingError(str(exc), status_code=500) from exc
+
+
+def list_document_chunks(db: Session, document_id: int) -> list[DocumentChunk]:
+    document = db.get(Document, document_id)
+    if document is None:
+        raise DocumentChunkingError("Document not found.", status_code=404)
+
+    statement = (
+        select(DocumentChunk)
+        .where(DocumentChunk.document_id == document_id)
+        .order_by(DocumentChunk.chunk_index)
+    )
+    return list(db.scalars(statement).all())
 
 
 def _document_title(title: str | None, filename: str | None) -> str:
@@ -264,6 +377,29 @@ def _save_extracted_text(
         extracted_text_path=_source_path_for_database(target_path),
         character_count=len(text),
     )
+
+
+def _resolved_extracted_text_path(document_id: int, settings: Settings) -> Path:
+    extracted_text_dir = _resolved_extracted_text_dir(settings.extracted_text_dir)
+    extracted_text_path = (extracted_text_dir / f"document-{document_id}.txt").resolve()
+    if not extracted_text_path.is_relative_to(extracted_text_dir):
+        raise DocumentChunkingError(
+            "Extracted text path is outside the configured directory.",
+            status_code=500,
+        )
+
+    if not extracted_text_path.is_file():
+        raise DocumentChunkingError("Extracted text file not found.", status_code=404)
+
+    return extracted_text_path
+
+
+def _validate_chunking_settings(settings: Settings) -> None:
+    if settings.chunk_overlap_chars >= settings.chunk_max_chars:
+        raise DocumentChunkingError(
+            "CHUNK_OVERLAP_CHARS must be smaller than CHUNK_MAX_CHARS.",
+            status_code=500,
+        )
 
 
 def _update_document_status(

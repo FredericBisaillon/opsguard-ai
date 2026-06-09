@@ -5,8 +5,14 @@ from sqlalchemy.orm import Session
 
 from opsguard_api.config import Settings, get_settings
 from opsguard_api.db import get_db
-from opsguard_api.models import Document
-from opsguard_api.schemas import DocumentCreate, DocumentExtractionRead, DocumentRead
+from opsguard_api.models import Document, DocumentChunk
+from opsguard_api.schemas import (
+    DocumentChunkingRead,
+    DocumentChunkRead,
+    DocumentCreate,
+    DocumentExtractionRead,
+    DocumentRead,
+)
 from opsguard_api.services import documents as documents_service
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -63,4 +69,37 @@ def extract_document_text(
             settings=settings,
         )
     except documents_service.DocumentTextExtractionError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+
+
+@router.post(
+    "/{document_id}/chunk",
+    response_model=DocumentChunkingRead,
+)
+def chunk_document(
+    document_id: int,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> documents_service.DocumentChunkingResult:
+    try:
+        return documents_service.chunk_document(
+            db=db,
+            document_id=document_id,
+            settings=settings,
+        )
+    except documents_service.DocumentChunkingError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+
+
+@router.get(
+    "/{document_id}/chunks",
+    response_model=list[DocumentChunkRead],
+)
+def list_document_chunks(
+    document_id: int,
+    db: Session = Depends(get_db),
+) -> list[DocumentChunk]:
+    try:
+        return documents_service.list_document_chunks(db=db, document_id=document_id)
+    except documents_service.DocumentChunkingError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc

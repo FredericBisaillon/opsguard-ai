@@ -9,3 +9,5 @@ Minimal FastAPI backend for OpsGuard AI.
 - `GET /documents` lists document rows.
 - `POST /documents/upload` accepts a PDF, Markdown, or plain text file, stores it locally, and creates a document row with status `uploaded`.
 - `POST /documents/{document_id}/extract-text` extracts text from an uploaded PDF, Markdown, or plain text file, stores the extracted text locally, and updates the document status.
+- `POST /documents/{document_id}/chunk` chunks extracted text into ordered, structure-aware document chunks.
+- `GET /documents/{document_id}/chunks` lists persisted chunks for a document.

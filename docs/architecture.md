@@ -1,8 +1,8 @@
 # Architecture actuelle
 
-Ce document décrit l'architecture actuelle d'OpsGuard AI. Il reflète l'état réel du projet à ce stade: API FastAPI, upload local minimal, extraction de texte locale, validation Pydantic, persistance PostgreSQL et frontend Next.js minimal.
+Ce document décrit l'architecture actuelle d'OpsGuard AI. Il reflète l'état réel du projet à ce stade: API FastAPI, upload local minimal, extraction de texte locale, chunking structure-aware, validation Pydantic, persistance PostgreSQL et frontend Next.js minimal.
 
-OpsGuard AI ne fait pas encore d'OCR, de chunking, d'embeddings, de recherche sémantique, de RAG, d'authentification ou de multi-tenant.
+OpsGuard AI ne fait pas encore d'OCR, d'embeddings, de recherche sémantique, de RAG, d'authentification ou de multi-tenant.
 
 ## 1. Vue d'ensemble
 
@@ -21,6 +21,8 @@ Le backend expose actuellement une API HTTP simple:
 - `POST /documents`
 - `POST /documents/upload`
 - `POST /documents/{document_id}/extract-text`
+- `POST /documents/{document_id}/chunk`
+- `GET /documents/{document_id}/chunks`
 - `GET /documents`
 
 La base de données locale est PostgreSQL dans Docker. L'image utilisée inclut pgvector afin de préparer les prochaines étapes liées aux embeddings, même si aucun embedding n'est encore stocké.
@@ -84,6 +86,27 @@ Les schemas Pydantic sont définis dans `opsguard_api.schemas`.
 - `character_count`;
 - `message`.
 
+`DocumentChunkingRead` définit la réponse du chunking:
+
+- `document_id`;
+- `status`;
+- `chunk_count`;
+- `chunk_max_chars`;
+- `chunk_overlap_chars`;
+- `message`.
+
+`DocumentChunkRead` expose un chunk persisté pour le debug et les tests:
+
+- `id`;
+- `document_id`;
+- `chunk_index`;
+- `content`;
+- `character_count`;
+- `section_title`;
+- `start_char`;
+- `end_char`;
+- `created_at`.
+
 ## 5. Routes vs services
 
 Les routes sont responsables de la couche HTTP:
@@ -100,9 +123,11 @@ Les services contiennent la logique applicative simple:
 - lister les documents;
 - valider et sauvegarder un upload documentaire minimal;
 - orchestrer l'extraction de texte et les changements de statut;
+- orchestrer le chunking et la persistance des chunks;
 - gérer les opérations SQLAlchemy nécessaires.
 
 La lecture concrète des fichiers est isolée dans `opsguard_api.services.extraction`, afin de garder la logique `.md`, `.txt` et `.pdf` hors de la route HTTP.
+La logique de découpage est isolée dans `opsguard_api.services.chunking`. Ce helper ne dépend pas de FastAPI ni de SQLAlchemy: il reçoit du texte et retourne des chunks typés avec section, offsets et taille.
 
 Cette séparation garde les routes minces et rend la logique métier plus facile à tester et à faire évoluer.
 
@@ -113,10 +138,19 @@ Le modèle SQLAlchemy `Document` décrit la table persistée en base:
 - nom de table: `documents`;
 - colonnes: `id`, `title`, `source_type`, `source_path`, `status`, `created_at`, `updated_at`.
 
+Le modèle SQLAlchemy `DocumentChunk` décrit les chunks persistés:
+
+- nom de table: `document_chunks`;
+- colonnes: `id`, `document_id`, `chunk_index`, `content`, `character_count`, `section_title`, `start_char`, `end_char`, `created_at`;
+- relation plusieurs-à-un vers `Document`;
+- contrainte unique `(document_id, chunk_index)`.
+
 Les schemas Pydantic décrivent les contrats de l'API:
 
 - `DocumentCreate` pour l'entrée utilisateur;
-- `DocumentRead` pour la sortie HTTP.
+- `DocumentRead` pour la sortie HTTP;
+- `DocumentExtractionRead` pour l'extraction;
+- `DocumentChunkingRead` et `DocumentChunkRead` pour le chunking.
 
 Cette séparation évite de lier directement le contrat public de l'API au modèle de persistance. Elle permet aussi d'avoir des règles de validation différentes des contraintes SQL.
 
@@ -196,7 +230,7 @@ Client
 -> réponse HTTP 201
 ```
 
-Cette route accepte les PDF, Markdown et texte brut. Elle limite la taille via `MAX_UPLOAD_SIZE_MB`, refuse les fichiers vides, ne fait pas confiance au nom client pour le chemin final, et ne déclenche pas encore de chunking ou embedding.
+Cette route accepte les PDF, Markdown et texte brut. Elle limite la taille via `MAX_UPLOAD_SIZE_MB`, refuse les fichiers vides, ne fait pas confiance au nom client pour le chemin final, et ne déclenche pas automatiquement extraction, chunking ou embedding.
 
 ## 10. Flow complet de `POST /documents/{document_id}/extract-text`
 
@@ -222,7 +256,59 @@ Client
 
 En cas d'échec après récupération du document, le statut passe à `extraction_failed`. L'endpoint retourne `404` si le document ou son fichier source n'existe pas, et `400` si le type ou le contenu ne permet pas d'extraire du texte.
 
-## 11. Flow complet de `GET /documents`
+## 11. Flow complet de `POST /documents/{document_id}/chunk`
+
+Flux actuel:
+
+```text
+Client
+-> POST /documents/{document_id}/chunk
+-> FastAPI route chunk_document
+-> injection d'une session SQLAlchemy via get_db
+-> lecture de Settings via get_settings
+-> appel du service documents_service.chunk_document
+-> récupération du Document par id
+-> vérification du status text_extracted, chunked ou chunking_failed
+-> résolution contrôlée de EXTRACTED_TEXT_DIR/document-{document_id}.txt
+-> lecture du texte extrait
+-> appel du helper services.chunking.chunk_text
+-> suppression des anciens chunks du document
+-> insertion des nouveaux DocumentChunk
+-> mise à jour du status à chunked
+-> sérialisation avec DocumentChunkingRead
+-> réponse HTTP 200
+```
+
+Le chunking est idempotent: rappeler l'endpoint supprime les chunks existants du document avant de les recréer. En cas d'échec après récupération du document, le statut passe à `chunking_failed`.
+
+Le chunker applique une stratégie structure-aware minimale:
+
+- normalisation légère des sauts de ligne et espaces;
+- détection de titres Markdown, titres numérotés simples et titres courts en majuscules;
+- découpage par blocs logiques séparés par lignes vides;
+- conservation du contexte de section dans le contenu du chunk;
+- respect de `CHUNK_MAX_CHARS` autant que possible;
+- overlap limité via `CHUNK_OVERLAP_CHARS` lorsque des blocs trop longs doivent être coupés.
+
+## 12. Flow complet de `GET /documents/{document_id}/chunks`
+
+Flux actuel:
+
+```text
+Client
+-> GET /documents/{document_id}/chunks
+-> FastAPI route list_document_chunks
+-> injection d'une session SQLAlchemy via get_db
+-> vérification que le Document existe
+-> requête SQLAlchemy select(DocumentChunk)
+-> tri par chunk_index
+-> sérialisation avec list[DocumentChunkRead]
+-> réponse HTTP 200
+```
+
+Cette route est volontairement simple. Elle aide à vérifier le résultat du chunking avant l'ajout d'un frontend complet, des embeddings et du retrieval.
+
+## 13. Flow complet de `GET /documents`
 
 Flux actuel:
 
@@ -241,7 +327,7 @@ Client
 
 Cette route expose les documents existants en base, sans pagination ni filtres pour l'instant.
 
-## 12. Limites actuelles
+## 14. Limites actuelles
 
 Limites connues:
 
@@ -250,18 +336,18 @@ Limites connues:
 - les tests utilisent la base configurée par `DATABASE_URL`;
 - il n'y a pas encore d'isolation de données par utilisateur ou tenant;
 - il n'y a pas d'OCR pour les PDF scannés;
-- il n'y a pas de chunks, embeddings ou recherche vectorielle;
+- le chunking reste heuristique et ne parse pas encore les tableaux ou structures PDF complexes;
+- il n'y a pas encore d'embeddings ou de recherche vectorielle;
 - il n'y a pas de couche IA;
 - il n'y a pas encore de gestion d'erreurs avancée, pagination ou observabilité.
 
-## 13. Prochaines étapes
+## 15. Prochaines étapes
 
 Prochaines évolutions techniques recommandées:
 
 1. Introduire Alembic avant de complexifier le schéma.
-2. Introduire une table de chunks.
-3. Générer et stocker des embeddings avec pgvector.
-4. Construire une recherche sémantique.
-5. Ajouter des réponses avec citations.
-6. Ajouter auth, rôles et isolation tenant.
-7. Ajouter des évaluations et une CI plus complète.
+2. Générer et stocker des embeddings avec pgvector.
+3. Construire une recherche sémantique.
+4. Ajouter des réponses avec citations.
+5. Ajouter auth, rôles et isolation tenant.
+6. Ajouter des évaluations et une CI plus complète.
