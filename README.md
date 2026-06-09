@@ -2,7 +2,7 @@
 
 OpsGuard AI est une plateforme de revue documentaire IA sécurisée, construite progressivement comme projet portfolio backend/IA. Le but est de démontrer une architecture web maintenable, testable et orientée sécurité pour l'ingestion, la recherche et la revue de documents sensibles.
 
-Le projet ne fait pas encore de RAG ni d'analyse IA. Le bloc actuel stabilise une base saine: API FastAPI, validation Pydantic, persistance PostgreSQL, documentation et tests de base.
+Le projet ne fait pas encore de RAG ni d'analyse IA. Le bloc actuel stabilise une base saine: API FastAPI, upload local minimal de documents, validation Pydantic, persistance PostgreSQL, documentation et tests de base.
 
 ## État actuel
 
@@ -13,7 +13,9 @@ Ce qui existe aujourd'hui:
 - un modèle `Document` SQLAlchemy;
 - des schemas Pydantic pour créer et lire des documents;
 - `POST /documents` pour créer une entrée documentaire;
+- `POST /documents/upload` pour téléverser un PDF ou un Markdown localement;
 - `GET /documents` pour lister les documents;
+- une configuration locale de dossier d'upload et taille maximale;
 - une base PostgreSQL locale lancée avec Docker Compose;
 - l'image PostgreSQL `pgvector/pgvector:pg16`;
 - l'extension `vector` activée au démarrage de l'API;
@@ -22,7 +24,6 @@ Ce qui existe aujourd'hui:
 
 Ce qui n'existe pas encore:
 
-- upload réel de PDF;
 - parsing PDF ou Markdown;
 - extraction de texte;
 - chunking;
@@ -120,9 +121,13 @@ POSTGRES_HOST=localhost
 POSTGRES_PORT=5432
 
 DATABASE_URL=postgresql+psycopg://opsguard:change-me-local-only@localhost:5432/opsguard_ai
+
+UPLOAD_DIR=data/uploads
+MAX_UPLOAD_SIZE_MB=10
 ```
 
 Ne commit jamais de vrais secrets dans `.env`. Le fichier `.env.example` sert uniquement de modèle local.
+Les fichiers téléversés sont sauvegardés localement dans `UPLOAD_DIR`. Les fichiers générés dans `data/uploads/` sont ignorés par Git.
 
 ## Lancer PostgreSQL
 
@@ -226,6 +231,34 @@ Réponse exemple:
 }
 ```
 
+### `POST /documents/upload`
+
+Téléverse un fichier PDF ou Markdown, le sauvegarde dans un dossier local contrôlé, puis crée une entrée documentaire avec `source_type = "uploaded_file"` et `status = "uploaded"`.
+
+Form-data:
+
+- `file`: fichier obligatoire;
+- `title`: titre optionnel. Si absent, le nom original du fichier est utilisé comme titre.
+
+Types acceptés:
+
+- `.pdf` avec `application/pdf`;
+- `.md` avec `text/markdown` ou `text/plain`.
+
+Réponse exemple:
+
+```json
+{
+  "id": 2,
+  "title": "security-policy.md",
+  "source_type": "uploaded_file",
+  "source_path": "data/uploads/9e1b6c77c8b84a089ec77ccfba3d260a.md",
+  "status": "uploaded",
+  "created_at": "2026-06-09T12:05:00Z",
+  "updated_at": "2026-06-09T12:05:00Z"
+}
+```
+
 ### `GET /documents`
 
 Liste les documents persistés, triés du plus récent au plus ancien.
@@ -251,9 +284,8 @@ Réponse exemple:
 Prochains blocs prévus:
 
 1. Remplacer `create_all()` par Alembic avant de complexifier le schéma.
-2. Ajouter l'upload réel de documents.
-3. Extraire le texte des fichiers supportés.
-4. Introduire le chunking et le stockage des chunks.
-5. Ajouter les embeddings et une première recherche sémantique avec pgvector.
-6. Construire une réponse avec citations.
-7. Ajouter les premières tâches de revue et les contrôles de sécurité.
+2. Extraire le texte des fichiers supportés.
+3. Introduire le chunking et le stockage des chunks.
+4. Ajouter les embeddings et une première recherche sémantique avec pgvector.
+5. Construire une réponse avec citations.
+6. Ajouter les premières tâches de revue et les contrôles de sécurité.

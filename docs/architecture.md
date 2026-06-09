@@ -1,8 +1,8 @@
 # Architecture actuelle
 
-Ce document décrit l'architecture actuelle d'OpsGuard AI. Il reflète l'état réel du projet à ce stade: API FastAPI, validation Pydantic, persistance PostgreSQL et frontend Next.js minimal.
+Ce document décrit l'architecture actuelle d'OpsGuard AI. Il reflète l'état réel du projet à ce stade: API FastAPI, upload local minimal, validation Pydantic, persistance PostgreSQL et frontend Next.js minimal.
 
-OpsGuard AI ne fait pas encore d'upload réel, de parsing de documents, d'embeddings, de recherche sémantique, de RAG, d'authentification ou de multi-tenant.
+OpsGuard AI ne fait pas encore de parsing de documents, d'embeddings, de recherche sémantique, de RAG, d'authentification ou de multi-tenant.
 
 ## 1. Vue d'ensemble
 
@@ -19,6 +19,7 @@ Le backend expose actuellement une API HTTP simple:
 
 - `GET /health`
 - `POST /documents`
+- `POST /documents/upload`
 - `GET /documents`
 
 La base de données locale est PostgreSQL dans Docker. L'image utilisée inclut pgvector afin de préparer les prochaines étapes liées aux embeddings, même si aucun embedding n'est encore stocké.
@@ -87,6 +88,7 @@ Les services contiennent la logique applicative simple:
 
 - créer un document;
 - lister les documents;
+- valider et sauvegarder un upload documentaire minimal;
 - gérer les opérations SQLAlchemy nécessaires.
 
 Cette séparation garde les routes minces et rend la logique métier plus facile à tester et à faire évoluer.
@@ -157,9 +159,33 @@ Client
 -> réponse HTTP 201
 ```
 
-Le `status` initial est défini à `uploaded`. À ce stade, ce statut signifie seulement que l'entrée documentaire existe en base. Aucun fichier n'est encore téléversé ou analysé.
+Le `status` initial est défini à `uploaded`. Pour cette route historique, ce statut signifie seulement que l'entrée documentaire existe en base. Aucun fichier n'est téléversé par `POST /documents`.
 
-## 9. Flow complet de `GET /documents`
+## 9. Flow complet de `POST /documents/upload`
+
+Flux actuel:
+
+```text
+Client
+-> POST /documents/upload en multipart/form-data
+-> FastAPI route upload_document
+-> réception du champ file et du titre optionnel
+-> injection d'une session SQLAlchemy via get_db
+-> lecture de Settings via get_settings
+-> appel du service documents_service.create_uploaded_document
+-> validation extension + content-type
+-> sauvegarde locale dans UPLOAD_DIR avec un nom serveur UUID
+-> création d'un Document avec source_type = uploaded_file
+-> db.add(document)
+-> db.commit()
+-> db.refresh(document)
+-> sérialisation avec DocumentRead
+-> réponse HTTP 201
+```
+
+Cette route accepte seulement les PDF et Markdown. Elle limite la taille via `MAX_UPLOAD_SIZE_MB`, refuse les fichiers vides, ne fait pas confiance au nom client pour le chemin final, et ne déclenche pas encore de parsing, chunking ou embedding.
+
+## 10. Flow complet de `GET /documents`
 
 Flux actuel:
 
@@ -178,7 +204,7 @@ Client
 
 Cette route expose les documents existants en base, sans pagination ni filtres pour l'instant.
 
-## 10. Limites actuelles
+## 11. Limites actuelles
 
 Limites connues:
 
@@ -186,22 +212,20 @@ Limites connues:
 - il n'y a pas encore de migrations Alembic;
 - les tests utilisent la base configurée par `DATABASE_URL`;
 - il n'y a pas encore d'isolation de données par utilisateur ou tenant;
-- il n'y a pas d'upload de fichier;
 - il n'y a pas de parsing documentaire;
 - il n'y a pas de chunks, embeddings ou recherche vectorielle;
 - il n'y a pas de couche IA;
 - il n'y a pas encore de gestion d'erreurs avancée, pagination ou observabilité.
 
-## 11. Prochaines étapes
+## 12. Prochaines étapes
 
 Prochaines évolutions techniques recommandées:
 
 1. Introduire Alembic avant de complexifier le schéma.
-2. Ajouter l'upload réel de documents.
-3. Ajouter l'extraction de texte.
-4. Introduire une table de chunks.
-5. Générer et stocker des embeddings avec pgvector.
-6. Construire une recherche sémantique.
-7. Ajouter des réponses avec citations.
-8. Ajouter auth, rôles et isolation tenant.
-9. Ajouter des évaluations et une CI plus complète.
+2. Ajouter l'extraction de texte.
+3. Introduire une table de chunks.
+4. Générer et stocker des embeddings avec pgvector.
+5. Construire une recherche sémantique.
+6. Ajouter des réponses avec citations.
+7. Ajouter auth, rôles et isolation tenant.
+8. Ajouter des évaluations et une CI plus complète.

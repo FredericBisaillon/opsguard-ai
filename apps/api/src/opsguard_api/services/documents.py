@@ -1,8 +1,35 @@
+from dataclasses import dataclass
+from pathlib import Path
+from uuid import uuid4
+
+from fastapi import UploadFile
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from opsguard_api.config import PROJECT_ROOT, Settings
 from opsguard_api.models import Document, DocumentStatus
 from opsguard_api.schemas import DocumentCreate
+
+CHUNK_SIZE_BYTES = 1024 * 1024
+DOCUMENT_TITLE_MAX_LENGTH = 255
+UPLOADED_FILE_SOURCE_TYPE = "uploaded_file"
+ALLOWED_UPLOAD_CONTENT_TYPES = {
+    ".pdf": {"application/pdf"},
+    ".md": {"text/markdown", "text/plain"},
+}
+
+
+class DocumentUploadError(Exception):
+    def __init__(self, message: str, status_code: int = 400) -> None:
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+
+
+@dataclass(frozen=True)
+class SavedUpload:
+    absolute_path: Path
+    source_path: str
 
 
 def create_document(db: Session, document_in: DocumentCreate) -> Document:
@@ -20,9 +47,109 @@ def create_document(db: Session, document_in: DocumentCreate) -> Document:
     return document
 
 
+def create_uploaded_document(
+    db: Session,
+    upload: UploadFile,
+    title: str | None,
+    settings: Settings,
+) -> Document:
+    document_title = _document_title(title, upload.filename)
+    saved_upload = _save_upload_file(upload, settings)
+    document_in = DocumentCreate(
+        title=document_title,
+        source_type=UPLOADED_FILE_SOURCE_TYPE,
+        source_path=saved_upload.source_path,
+    )
+
+    try:
+        return create_document(db, document_in)
+    except Exception:
+        saved_upload.absolute_path.unlink(missing_ok=True)
+        raise
+
+
 def list_documents(db: Session) -> list[Document]:
     statement = select(Document).order_by(
         Document.created_at.desc(),
         Document.id.desc(),
     )
     return list(db.scalars(statement).all())
+
+
+def _document_title(title: str | None, filename: str | None) -> str:
+    document_title = (title or "").strip()
+    if not document_title:
+        document_title = Path(filename or "uploaded-document").name
+
+    if not document_title:
+        document_title = "uploaded-document"
+
+    if len(document_title) > DOCUMENT_TITLE_MAX_LENGTH:
+        raise DocumentUploadError("Title must be 255 characters or fewer.")
+
+    return document_title
+
+
+def _save_upload_file(upload: UploadFile, settings: Settings) -> SavedUpload:
+    extension = _validated_extension(upload.filename, upload.content_type)
+    upload_dir = _resolved_upload_dir(settings.upload_dir)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    stored_filename = f"{uuid4().hex}{extension}"
+    target_path = (upload_dir / stored_filename).resolve()
+    if not target_path.is_relative_to(upload_dir):
+        raise DocumentUploadError("Upload path is outside the configured directory.")
+
+    bytes_written = 0
+    try:
+        upload.file.seek(0)
+        with target_path.open("wb") as output_file:
+            while chunk := upload.file.read(CHUNK_SIZE_BYTES):
+                bytes_written += len(chunk)
+                if bytes_written > settings.max_upload_size_bytes:
+                    message = (
+                        f"File exceeds the {settings.max_upload_size_mb} MB "
+                        "upload limit."
+                    )
+                    raise DocumentUploadError(
+                        message,
+                        status_code=413,
+                    )
+                output_file.write(chunk)
+
+        if bytes_written == 0:
+            raise DocumentUploadError("Uploaded file cannot be empty.")
+    except Exception:
+        target_path.unlink(missing_ok=True)
+        raise
+
+    return SavedUpload(
+        absolute_path=target_path,
+        source_path=_source_path_for_database(target_path),
+    )
+
+
+def _validated_extension(filename: str | None, content_type: str | None) -> str:
+    extension = Path(filename or "").suffix.lower()
+    if extension not in ALLOWED_UPLOAD_CONTENT_TYPES:
+        raise DocumentUploadError("Only PDF and Markdown files are supported.")
+
+    normalized_content_type = (content_type or "").split(";")[0].strip().lower()
+    if normalized_content_type not in ALLOWED_UPLOAD_CONTENT_TYPES[extension]:
+        raise DocumentUploadError("File content type does not match an allowed type.")
+
+    return extension
+
+
+def _resolved_upload_dir(upload_dir: Path) -> Path:
+    if upload_dir.is_absolute():
+        return upload_dir.resolve()
+
+    return (PROJECT_ROOT / upload_dir).resolve()
+
+
+def _source_path_for_database(target_path: Path) -> str:
+    try:
+        return target_path.relative_to(PROJECT_ROOT).as_posix()
+    except ValueError:
+        return target_path.as_posix()
