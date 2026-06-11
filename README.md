@@ -2,7 +2,7 @@
 
 OpsGuard AI est une plateforme de revue documentaire IA sécurisée, construite progressivement comme projet portfolio backend/IA. Le but est de démontrer une architecture web maintenable, testable et orientée sécurité pour l'ingestion, la recherche et la revue de documents sensibles.
 
-Le projet ne fait pas encore de RAG ni d'analyse IA. Le bloc actuel stabilise une base saine: API FastAPI, upload local de documents, extraction de texte minimale, chunking structure-aware, validation Pydantic, persistance PostgreSQL, documentation et tests de base.
+Le projet ne fait pas encore de RAG ni de génération de réponses IA. Le bloc actuel stabilise une base saine: API FastAPI, upload local de documents, extraction de texte minimale, chunking structure-aware, génération d'embeddings de chunks, persistance PostgreSQL/pgvector, migrations Alembic, documentation et tests de base.
 
 ## État actuel
 
@@ -17,24 +17,25 @@ Ce qui existe aujourd'hui:
 - `POST /documents/upload` pour téléverser un PDF, Markdown ou texte brut localement;
 - `POST /documents/{document_id}/extract-text` pour extraire le texte d'un document uploadé;
 - `POST /documents/{document_id}/chunk` pour découper le texte extrait en chunks;
+- `POST /documents/{document_id}/embed` pour générer et stocker les embeddings des chunks;
 - `GET /documents/{document_id}/chunks` pour inspecter les chunks d'un document;
 - `GET /documents` pour lister les documents;
 - une configuration locale de dossier d'upload, dossier d'extraction, taille maximale et limites de chunking;
 - une base PostgreSQL locale lancée avec Docker Compose;
 - l'image PostgreSQL `pgvector/pgvector:pg16`;
-- l'extension `vector` activée au démarrage de l'API;
+- l'extension `vector` activée via Alembic;
+- Alembic pour versionner le schéma local;
+- le SDK OpenAI pour générer les embeddings;
 - un frontend Next.js minimal;
-- des tests pytest pour `/health`, les documents, l'upload et l'extraction.
+- des tests pytest pour `/health`, les documents, l'upload, l'extraction, le chunking et les embeddings.
 
 Ce qui n'existe pas encore:
 
 - OCR pour les PDF scannés;
-- embeddings;
-- colonnes vectorielles ou recherche sémantique;
+- recherche sémantique;
 - RAG ou réponses avec citations;
-- intégration OpenAI, Anthropic ou autre fournisseur IA;
+- génération LLM/chat;
 - authentification, rôles ou isolation tenant;
-- migrations Alembic;
 - dashboard frontend complet;
 - CI complète.
 
@@ -47,9 +48,11 @@ Ce qui n'existe pas encore:
 - Pydantic
 - pydantic-settings
 - pypdf
+- OpenAI SDK
 - psycopg
 - PostgreSQL
 - pgvector
+- Alembic
 - Docker Compose
 - Next.js
 - TypeScript
@@ -130,11 +133,17 @@ EXTRACTED_TEXT_DIR=data/extracted
 MAX_UPLOAD_SIZE_MB=10
 CHUNK_MAX_CHARS=1200
 CHUNK_OVERLAP_CHARS=150
+
+OPENAI_API_KEY=
+EMBEDDING_MODEL=text-embedding-3-small
+EMBEDDING_DIMENSIONS=1536
+EMBEDDING_BATCH_SIZE=64
 ```
 
 Ne commit jamais de vrais secrets dans `.env`. Le fichier `.env.example` sert uniquement de modèle local.
 Les fichiers téléversés sont sauvegardés localement dans `UPLOAD_DIR`. Les textes extraits sont sauvegardés dans `EXTRACTED_TEXT_DIR`. Les fichiers générés dans `data/uploads/` et `data/extracted/` sont ignorés par Git.
 `CHUNK_MAX_CHARS` et `CHUNK_OVERLAP_CHARS` contrôlent la taille des chunks créés depuis le texte extrait. L'overlap est surtout utilisé lorsque le backend doit couper un bloc trop long.
+`OPENAI_API_KEY` est requis uniquement pour `POST /documents/{document_id}/embed`. `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS` et `EMBEDDING_BATCH_SIZE` contrôlent la génération des embeddings de chunks. La dimension actuelle doit rester `1536`, car la colonne PostgreSQL est typée `vector(1536)`.
 
 ## Lancer PostgreSQL
 
@@ -166,7 +175,7 @@ L'API est disponible par défaut sur:
 http://127.0.0.1:8000
 ```
 
-Au démarrage, l'API initialise temporairement les tables avec `SQLAlchemy.create_all()` et active l'extension PostgreSQL `vector` si le dialecte est PostgreSQL.
+Au démarrage local, l'API applique les migrations Alembic jusqu'à `head`. La première migration active l'extension PostgreSQL `vector`, crée les tables documentaires et ajoute `document_chunks.embedding vector(1536)`.
 
 ## Lancer le frontend
 
@@ -195,6 +204,11 @@ uv run mypy
 ```
 
 Les tests actuels supposent une base PostgreSQL locale accessible via `DATABASE_URL`.
+Pour appliquer explicitement les migrations:
+
+```bash
+uv run alembic upgrade head
+```
 
 ## Endpoints actuels
 
@@ -304,6 +318,25 @@ Réponse exemple:
 
 En cas de succès, le statut du document passe à `chunked`. En cas d'échec après le début du chunking, il passe à `chunking_failed`.
 
+### `POST /documents/{document_id}/embed`
+
+Génère un embedding OpenAI pour chaque chunk déjà persisté, puis stocke les vecteurs dans `document_chunks.embedding` avec pgvector. Le document doit être `chunked`, `embedded` ou `embedding_failed`. Rappeler l'endpoint est idempotent: les chunks ne sont pas recréés et les embeddings existants sont remplacés.
+
+Réponse exemple:
+
+```json
+{
+  "document_id": 2,
+  "status": "embedded",
+  "embedding_model": "text-embedding-3-small",
+  "embedding_dimensions": 1536,
+  "embedded_chunk_count": 4,
+  "message": "Document chunks embedded successfully."
+}
+```
+
+L'API ne renvoie jamais les vecteurs complets. En cas de succès, le statut passe à `embedded`. En cas d'échec provider ou stockage après le démarrage du traitement, il passe à `embedding_failed`.
+
 ### `GET /documents/{document_id}/chunks`
 
 Retourne les chunks persistés d'un document, ordonnés par `chunk_index`. Cet endpoint sert surtout au debug et aux tests tant que l'interface documentaire complète n'existe pas encore.
@@ -350,7 +383,6 @@ Réponse exemple:
 
 Prochains blocs prévus:
 
-1. Remplacer `create_all()` par Alembic avant de complexifier le schéma.
-2. Ajouter les embeddings et une première recherche sémantique avec pgvector.
-3. Construire une réponse avec citations.
-4. Ajouter les premières tâches de revue et les contrôles de sécurité.
+1. Ajouter une première recherche sémantique avec pgvector.
+2. Construire une réponse avec citations.
+3. Ajouter les premières tâches de revue et les contrôles de sécurité.

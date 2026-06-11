@@ -1,9 +1,14 @@
 from collections.abc import Generator
+from pathlib import Path
 
-from sqlalchemy import create_engine, text
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from opsguard_api.config import get_settings
+
+API_ROOT = Path(__file__).resolve().parents[2]
 
 
 class Base(DeclarativeBase):
@@ -16,13 +21,15 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False
 
 
 def init_database() -> None:
+    if engine.dialect.name == "postgresql":
+        alembic_config = Config(str(API_ROOT / "alembic.ini"))
+        alembic_config.set_main_option("sqlalchemy.url", settings.database_url)
+        command.upgrade(alembic_config, "head")
+        return
+
     import opsguard_api.models  # noqa: F401
 
-    with engine.begin() as connection:
-        if engine.dialect.name == "postgresql":
-            connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-
-        Base.metadata.create_all(bind=connection)
+    Base.metadata.create_all(bind=engine)
 
 
 def get_db() -> Generator[Session, None, None]:

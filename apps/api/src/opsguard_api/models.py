@@ -1,6 +1,7 @@
 from datetime import datetime
 from enum import StrEnum
 
+from pgvector.sqlalchemy import VECTOR  # type: ignore[import-untyped]
 from sqlalchemy import (
     DateTime,
     ForeignKey,
@@ -12,6 +13,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from opsguard_api.constants import DEFAULT_EMBEDDING_DIMENSIONS
 from opsguard_api.db import Base
 
 
@@ -23,6 +25,9 @@ class DocumentStatus(StrEnum):
     CHUNKING = "chunking"
     CHUNKED = "chunked"
     CHUNKING_FAILED = "chunking_failed"
+    EMBEDDING = "embedding"
+    EMBEDDED = "embedded"
+    EMBEDDING_FAILED = "embedding_failed"
     PENDING = "pending"
     PROCESSED = "processed"
     FAILED = "failed"
@@ -81,6 +86,10 @@ class DocumentChunk(Base):
     section_title: Mapped[str | None] = mapped_column(String(255), nullable=True)
     start_char: Mapped[int | None] = mapped_column(Integer, nullable=True)
     end_char: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    embedding: Mapped[list[float] | None] = mapped_column(
+        VECTOR(DEFAULT_EMBEDDING_DIMENSIONS),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

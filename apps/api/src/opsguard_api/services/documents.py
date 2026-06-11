@@ -4,11 +4,19 @@ from uuid import uuid4
 
 from fastapi import UploadFile
 from sqlalchemy import delete, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from opsguard_api.config import PROJECT_ROOT, Settings
+from opsguard_api.constants import DEFAULT_EMBEDDING_DIMENSIONS
 from opsguard_api.models import Document, DocumentChunk, DocumentStatus
 from opsguard_api.schemas import DocumentCreate
+from opsguard_api.services.embeddings import (
+    EmbeddingClient,
+    EmbeddingClientError,
+    EmbeddingConfigurationError,
+    EmbeddingProviderError,
+)
 
 CHUNK_SIZE_BYTES = 1024 * 1024
 DOCUMENT_TITLE_MAX_LENGTH = 255
@@ -35,6 +43,13 @@ class DocumentTextExtractionError(Exception):
 
 
 class DocumentChunkingError(Exception):
+    def __init__(self, message: str, status_code: int = 400) -> None:
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+
+
+class DocumentEmbeddingError(Exception):
     def __init__(self, message: str, status_code: int = 400) -> None:
         super().__init__(message)
         self.message = message
@@ -69,6 +84,16 @@ class DocumentChunkingResult:
     chunk_count: int
     chunk_max_chars: int
     chunk_overlap_chars: int
+    message: str
+
+
+@dataclass(frozen=True)
+class DocumentEmbeddingResult:
+    document_id: int
+    status: str
+    embedding_model: str
+    embedding_dimensions: int
+    embedded_chunk_count: int
     message: str
 
 
@@ -248,6 +273,142 @@ def list_document_chunks(db: Session, document_id: int) -> list[DocumentChunk]:
         .order_by(DocumentChunk.chunk_index)
     )
     return list(db.scalars(statement).all())
+
+
+def embed_document_chunks(
+    db: Session,
+    document_id: int,
+    settings: Settings,
+    embedding_client: EmbeddingClient,
+) -> DocumentEmbeddingResult:
+    document = db.get(Document, document_id)
+    if document is None:
+        raise DocumentEmbeddingError("Document not found.", status_code=404)
+
+    if document.status not in {
+        DocumentStatus.CHUNKED.value,
+        DocumentStatus.EMBEDDED.value,
+        DocumentStatus.EMBEDDING_FAILED.value,
+    }:
+        raise DocumentEmbeddingError(
+            "Document must be chunked before embedding.",
+            status_code=409,
+        )
+
+    chunks = _document_chunks_for_embedding(db, document.id)
+    if not chunks:
+        raise DocumentEmbeddingError(
+            "Document has no chunks to embed.",
+            status_code=409,
+        )
+
+    try:
+        _validate_embedding_settings(settings, embedding_client)
+        embedding_client.validate_configuration()
+    except EmbeddingConfigurationError as exc:
+        raise DocumentEmbeddingError(exc.message, status_code=500) from exc
+
+    try:
+        _update_document_status(db, document, DocumentStatus.EMBEDDING)
+        embedded_chunk_count = 0
+
+        for chunk_batch in _batched(chunks, settings.embedding_batch_size):
+            embeddings = embedding_client.embed_texts(
+                [chunk.content for chunk in chunk_batch]
+            )
+            if len(embeddings) != len(chunk_batch):
+                raise DocumentEmbeddingError(
+                    "Embedding provider returned an unexpected number of vectors.",
+                    status_code=502,
+                )
+
+            for chunk, embedding in zip(chunk_batch, embeddings, strict=True):
+                _validate_embedding_vector(embedding, embedding_client.dimensions)
+                chunk.embedding = embedding
+                db.add(chunk)
+                embedded_chunk_count += 1
+
+        document.status = DocumentStatus.EMBEDDED.value
+        db.add(document)
+        db.commit()
+        db.refresh(document)
+
+        return DocumentEmbeddingResult(
+            document_id=document.id,
+            status=DocumentStatus.EMBEDDED.value,
+            embedding_model=embedding_client.model,
+            embedding_dimensions=embedding_client.dimensions,
+            embedded_chunk_count=embedded_chunk_count,
+            message="Document chunks embedded successfully.",
+        )
+    except DocumentEmbeddingError:
+        db.rollback()
+        _update_document_status(db, document, DocumentStatus.EMBEDDING_FAILED)
+        raise
+    except EmbeddingProviderError as exc:
+        db.rollback()
+        _update_document_status(db, document, DocumentStatus.EMBEDDING_FAILED)
+        raise DocumentEmbeddingError(exc.message, status_code=502) from exc
+    except EmbeddingClientError as exc:
+        db.rollback()
+        _update_document_status(db, document, DocumentStatus.EMBEDDING_FAILED)
+        raise DocumentEmbeddingError(exc.message, status_code=500) from exc
+    except SQLAlchemyError as exc:
+        db.rollback()
+        _update_document_status(db, document, DocumentStatus.EMBEDDING_FAILED)
+        raise DocumentEmbeddingError(
+            "Failed to store embeddings.",
+            status_code=500,
+        ) from exc
+
+
+def _document_chunks_for_embedding(
+    db: Session,
+    document_id: int,
+) -> list[DocumentChunk]:
+    statement = (
+        select(DocumentChunk)
+        .where(DocumentChunk.document_id == document_id)
+        .order_by(DocumentChunk.chunk_index)
+    )
+    return list(db.scalars(statement).all())
+
+
+def _validate_embedding_settings(
+    settings: Settings,
+    embedding_client: EmbeddingClient,
+) -> None:
+    if settings.embedding_dimensions != DEFAULT_EMBEDDING_DIMENSIONS:
+        raise EmbeddingConfigurationError(
+            "EMBEDDING_DIMENSIONS must match the database vector dimension "
+            f"({DEFAULT_EMBEDDING_DIMENSIONS})."
+        )
+
+    if embedding_client.dimensions != settings.embedding_dimensions:
+        raise EmbeddingConfigurationError(
+            "Embedding client dimensions do not match EMBEDDING_DIMENSIONS."
+        )
+
+
+def _validate_embedding_vector(
+    embedding: list[float],
+    expected_dimensions: int,
+) -> None:
+    if len(embedding) != expected_dimensions:
+        raise DocumentEmbeddingError(
+            "Embedding provider returned vectors with unexpected dimensions.",
+            status_code=502,
+        )
+
+
+def _batched(
+    chunks: list[DocumentChunk],
+    batch_size: int,
+) -> list[list[DocumentChunk]]:
+    return [
+        chunks[index : index + batch_size]
+        for index in range(0, len(chunks), batch_size)
+    ]
 
 
 def _document_title(title: str | None, filename: str | None) -> str:

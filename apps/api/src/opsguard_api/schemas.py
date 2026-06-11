@@ -42,6 +42,15 @@ class DocumentChunkingRead(BaseModel):
     message: str
 
 
+class DocumentEmbeddingRead(BaseModel):
+    document_id: int
+    status: DocumentStatus
+    embedding_model: str
+    embedding_dimensions: int
+    embedded_chunk_count: int
+    message: str
+
+
 class DocumentChunkRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

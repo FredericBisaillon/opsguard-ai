@@ -10,12 +10,24 @@ from opsguard_api.schemas import (
     DocumentChunkingRead,
     DocumentChunkRead,
     DocumentCreate,
+    DocumentEmbeddingRead,
     DocumentExtractionRead,
     DocumentRead,
 )
 from opsguard_api.services import documents as documents_service
+from opsguard_api.services.embeddings import EmbeddingClient, OpenAIEmbeddingClient
 
 router = APIRouter(prefix="/documents", tags=["documents"])
+
+
+def get_embedding_client(
+    settings: Settings = Depends(get_settings),
+) -> EmbeddingClient:
+    return OpenAIEmbeddingClient(
+        api_key=settings.openai_api_key,
+        model=settings.embedding_model,
+        dimensions=settings.embedding_dimensions,
+    )
 
 
 @router.post("", response_model=DocumentRead, status_code=status.HTTP_201_CREATED)
@@ -88,6 +100,27 @@ def chunk_document(
             settings=settings,
         )
     except documents_service.DocumentChunkingError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+
+
+@router.post(
+    "/{document_id}/embed",
+    response_model=DocumentEmbeddingRead,
+)
+def embed_document(
+    document_id: int,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    embedding_client: EmbeddingClient = Depends(get_embedding_client),
+) -> documents_service.DocumentEmbeddingResult:
+    try:
+        return documents_service.embed_document_chunks(
+            db=db,
+            document_id=document_id,
+            settings=settings,
+            embedding_client=embedding_client,
+        )
+    except documents_service.DocumentEmbeddingError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
 
 

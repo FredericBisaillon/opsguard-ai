@@ -1,8 +1,8 @@
 # Architecture actuelle
 
-Ce document décrit l'architecture actuelle d'OpsGuard AI. Il reflète l'état réel du projet à ce stade: API FastAPI, upload local minimal, extraction de texte locale, chunking structure-aware, validation Pydantic, persistance PostgreSQL et frontend Next.js minimal.
+Ce document décrit l'architecture actuelle d'OpsGuard AI. Il reflète l'état réel du projet à ce stade: API FastAPI, upload local minimal, extraction de texte locale, chunking structure-aware, embeddings de chunks, validation Pydantic, persistance PostgreSQL/pgvector, migrations Alembic et frontend Next.js minimal.
 
-OpsGuard AI ne fait pas encore d'OCR, d'embeddings, de recherche sémantique, de RAG, d'authentification ou de multi-tenant.
+OpsGuard AI ne fait pas encore d'OCR, de recherche sémantique, de RAG, de génération de réponses LLM, d'authentification ou de multi-tenant.
 
 ## 1. Vue d'ensemble
 
@@ -22,10 +22,11 @@ Le backend expose actuellement une API HTTP simple:
 - `POST /documents/upload`
 - `POST /documents/{document_id}/extract-text`
 - `POST /documents/{document_id}/chunk`
+- `POST /documents/{document_id}/embed`
 - `GET /documents/{document_id}/chunks`
 - `GET /documents`
 
-La base de données locale est PostgreSQL dans Docker. L'image utilisée inclut pgvector afin de préparer les prochaines étapes liées aux embeddings, même si aucun embedding n'est encore stocké.
+La base de données locale est PostgreSQL dans Docker. L'image utilisée inclut pgvector, et les embeddings de chunks sont stockés dans `document_chunks.embedding`.
 
 ## 2. Frontend actuel
 
@@ -52,9 +53,12 @@ Technologies:
 - SQLAlchemy pour l'accès relationnel;
 - psycopg comme driver PostgreSQL;
 - pypdf pour l'extraction de texte PDF sans OCR;
+- pgvector pour le type vectoriel PostgreSQL;
+- OpenAI SDK pour la génération d'embeddings;
+- Alembic pour les migrations;
 - pytest, ruff et mypy pour la qualité.
 
-L'application FastAPI est définie dans `opsguard_api.main`. Au démarrage, son lifespan appelle `init_database()`, qui prépare temporairement la base locale.
+L'application FastAPI est définie dans `opsguard_api.main`. Au démarrage local, son lifespan appelle `init_database()`, qui applique les migrations Alembic jusqu'à `head`.
 
 ## 4. Validation avec Pydantic
 
@@ -95,6 +99,15 @@ Les schemas Pydantic sont définis dans `opsguard_api.schemas`.
 - `chunk_overlap_chars`;
 - `message`.
 
+`DocumentEmbeddingRead` définit la réponse de l'embedding:
+
+- `document_id`;
+- `status`;
+- `embedding_model`;
+- `embedding_dimensions`;
+- `embedded_chunk_count`;
+- `message`.
+
 `DocumentChunkRead` expose un chunk persisté pour le debug et les tests:
 
 - `id`;
@@ -124,10 +137,12 @@ Les services contiennent la logique applicative simple:
 - valider et sauvegarder un upload documentaire minimal;
 - orchestrer l'extraction de texte et les changements de statut;
 - orchestrer le chunking et la persistance des chunks;
+- orchestrer la génération d'embeddings et leur stockage;
 - gérer les opérations SQLAlchemy nécessaires.
 
 La lecture concrète des fichiers est isolée dans `opsguard_api.services.extraction`, afin de garder la logique `.md`, `.txt` et `.pdf` hors de la route HTTP.
 La logique de découpage est isolée dans `opsguard_api.services.chunking`. Ce helper ne dépend pas de FastAPI ni de SQLAlchemy: il reçoit du texte et retourne des chunks typés avec section, offsets et taille.
+La logique d'appel provider est isolée dans `opsguard_api.services.embeddings`. Le service documentaire dépend d'un client d'embeddings testable, ce qui permet de mocker OpenAI dans les tests.
 
 Cette séparation garde les routes minces et rend la logique métier plus facile à tester et à faire évoluer.
 
@@ -141,7 +156,7 @@ Le modèle SQLAlchemy `Document` décrit la table persistée en base:
 Le modèle SQLAlchemy `DocumentChunk` décrit les chunks persistés:
 
 - nom de table: `document_chunks`;
-- colonnes: `id`, `document_id`, `chunk_index`, `content`, `character_count`, `section_title`, `start_char`, `end_char`, `created_at`;
+- colonnes: `id`, `document_id`, `chunk_index`, `content`, `character_count`, `section_title`, `start_char`, `end_char`, `embedding`, `created_at`;
 - relation plusieurs-à-un vers `Document`;
 - contrainte unique `(document_id, chunk_index)`.
 
@@ -150,7 +165,8 @@ Les schemas Pydantic décrivent les contrats de l'API:
 - `DocumentCreate` pour l'entrée utilisateur;
 - `DocumentRead` pour la sortie HTTP;
 - `DocumentExtractionRead` pour l'extraction;
-- `DocumentChunkingRead` et `DocumentChunkRead` pour le chunking.
+- `DocumentChunkingRead` et `DocumentChunkRead` pour le chunking;
+- `DocumentEmbeddingRead` pour l'embedding des chunks.
 
 Cette séparation évite de lier directement le contrat public de l'API au modèle de persistance. Elle permet aussi d'avoir des règles de validation différentes des contraintes SQL.
 
@@ -164,7 +180,7 @@ Composants principaux:
 - `engine`: créé par SQLAlchemy avec `create_engine(...)`;
 - `SessionLocal`: fabrique les sessions SQLAlchemy;
 - `get_db()`: dépendance FastAPI qui fournit une session par requête;
-- `init_database()`: initialise temporairement la base au démarrage.
+- `init_database()`: applique les migrations Alembic au démarrage local.
 
 Le driver utilisé par SQLAlchemy est psycopg, via une URL de ce format:
 
@@ -178,13 +194,13 @@ PostgreSQL tourne localement avec Docker Compose. Le service utilise l'image:
 pgvector/pgvector:pg16
 ```
 
-Au démarrage, si le dialecte SQLAlchemy est PostgreSQL, l'API exécute:
+La migration initiale exécute:
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS vector
 ```
 
-Cela prépare la base pour les futurs embeddings, sans ajouter encore de logique vectorielle dans l'application.
+Elle crée aussi la colonne `document_chunks.embedding vector(1536)`. Les migrations peuvent être lancées explicitement avec `uv run alembic upgrade head` depuis `apps/api`.
 
 ## 8. Flow complet de `POST /documents`
 
@@ -290,7 +306,37 @@ Le chunker applique une stratégie structure-aware minimale:
 - respect de `CHUNK_MAX_CHARS` autant que possible;
 - overlap limité via `CHUNK_OVERLAP_CHARS` lorsque des blocs trop longs doivent être coupés.
 
-## 12. Flow complet de `GET /documents/{document_id}/chunks`
+## 12. Flow complet de `POST /documents/{document_id}/embed`
+
+Flux actuel:
+
+```text
+Client
+-> POST /documents/{document_id}/embed
+-> FastAPI route embed_document
+-> injection d'une session SQLAlchemy via get_db
+-> lecture de Settings via get_settings
+-> injection d'un client EmbeddingClient
+-> appel du service documents_service.embed_document_chunks
+-> récupération du Document par id
+-> vérification du status chunked, embedded ou embedding_failed
+-> récupération des DocumentChunk ordonnés par chunk_index
+-> validation de la configuration embeddings
+-> mise à jour du status à embedding
+-> appel du client d'embeddings par batch
+-> écriture de chaque vecteur dans DocumentChunk.embedding
+-> mise à jour du status à embedded
+-> sérialisation avec DocumentEmbeddingRead
+-> réponse HTTP 200
+```
+
+L'endpoint est idempotent: rappeler `embed` ne recrée pas les chunks et n'insère pas de doublons. Les embeddings existants sont remplacés sur les lignes `document_chunks` existantes.
+
+En cas d'absence de document, la route retourne `404`. En cas de document non chunked ou sans chunks, elle retourne une erreur HTTP propre sans appeler le provider. En cas d'échec provider ou stockage après le démarrage du traitement, le document passe à `embedding_failed`.
+
+La réponse ne renvoie jamais les vecteurs complets, uniquement le nombre de chunks embedded, le modèle, la dimension et le statut.
+
+## 13. Flow complet de `GET /documents/{document_id}/chunks`
 
 Flux actuel:
 
@@ -306,9 +352,9 @@ Client
 -> réponse HTTP 200
 ```
 
-Cette route est volontairement simple. Elle aide à vérifier le résultat du chunking avant l'ajout d'un frontend complet, des embeddings et du retrieval.
+Cette route est volontairement simple. Elle aide à vérifier le résultat du chunking avant l'ajout d'un frontend complet et du retrieval. Elle n'expose pas la colonne `embedding`.
 
-## 13. Flow complet de `GET /documents`
+## 14. Flow complet de `GET /documents`
 
 Flux actuel:
 
@@ -327,27 +373,25 @@ Client
 
 Cette route expose les documents existants en base, sans pagination ni filtres pour l'instant.
 
-## 14. Limites actuelles
+## 15. Limites actuelles
 
 Limites connues:
 
-- `create_all()` est utilisé temporairement au démarrage;
-- il n'y a pas encore de migrations Alembic;
 - les tests utilisent la base configurée par `DATABASE_URL`;
 - il n'y a pas encore d'isolation de données par utilisateur ou tenant;
 - il n'y a pas d'OCR pour les PDF scannés;
 - le chunking reste heuristique et ne parse pas encore les tableaux ou structures PDF complexes;
-- il n'y a pas encore d'embeddings ou de recherche vectorielle;
-- il n'y a pas de couche IA;
+- il n'y a pas encore de recherche vectorielle;
+- il n'y a pas encore de RAG ni de génération de réponse LLM;
+- la dimension d'embedding est fixée à `1536` côté schéma PostgreSQL;
+- l'endpoint d'embedding est synchrone et peut devenir lent sur de gros documents;
 - il n'y a pas encore de gestion d'erreurs avancée, pagination ou observabilité.
 
-## 15. Prochaines étapes
+## 16. Prochaines étapes
 
 Prochaines évolutions techniques recommandées:
 
-1. Introduire Alembic avant de complexifier le schéma.
-2. Générer et stocker des embeddings avec pgvector.
-3. Construire une recherche sémantique.
-4. Ajouter des réponses avec citations.
-5. Ajouter auth, rôles et isolation tenant.
-6. Ajouter des évaluations et une CI plus complète.
+1. Construire une recherche sémantique avec pgvector.
+2. Ajouter des réponses avec citations.
+3. Ajouter auth, rôles et isolation tenant.
+4. Ajouter des évaluations et une CI plus complète.
