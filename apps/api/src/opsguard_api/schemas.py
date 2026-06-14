@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from opsguard_api.models import DocumentStatus
 
@@ -63,3 +63,34 @@ class DocumentChunkRead(BaseModel):
     start_char: int | None
     end_char: int | None
     created_at: datetime
+
+
+class SemanticSearchRequest(BaseModel):
+    query: str = Field(min_length=1)
+    document_id: int | None = Field(default=None, gt=0)
+    top_k: int | None = Field(default=None, ge=1)
+
+    @field_validator("query")
+    @classmethod
+    def query_must_not_be_blank(cls, value: str) -> str:
+        query = value.strip()
+        if not query:
+            raise ValueError("Query cannot be empty.")
+        return query
+
+
+class SemanticSearchResult(BaseModel):
+    document_id: int
+    document_title: str
+    chunk_id: int
+    chunk_index: int
+    section_title: str | None
+    content: str
+    similarity_score: float
+
+
+class SemanticSearchResponse(BaseModel):
+    query: str
+    top_k: int
+    result_count: int
+    results: list[SemanticSearchResult]

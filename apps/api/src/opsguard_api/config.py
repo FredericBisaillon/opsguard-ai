@@ -8,6 +8,9 @@ from opsguard_api.constants import (
     DEFAULT_EMBEDDING_BATCH_SIZE,
     DEFAULT_EMBEDDING_DIMENSIONS,
     DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_SEARCH_TOP_K,
+    MAX_SEARCH_QUERY_CHARS,
+    MAX_SEARCH_TOP_K,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
@@ -24,6 +27,9 @@ class Settings(BaseSettings):
     embedding_model: str = DEFAULT_EMBEDDING_MODEL
     embedding_dimensions: int = Field(default=DEFAULT_EMBEDDING_DIMENSIONS, gt=0)
     embedding_batch_size: int = Field(default=DEFAULT_EMBEDDING_BATCH_SIZE, gt=0)
+    default_search_top_k: int = Field(default=DEFAULT_SEARCH_TOP_K, gt=0)
+    max_search_top_k: int = Field(default=MAX_SEARCH_TOP_K, gt=0)
+    max_search_query_chars: int = Field(default=MAX_SEARCH_QUERY_CHARS, gt=0)
 
     @property
     def max_upload_size_bytes(self) -> int:

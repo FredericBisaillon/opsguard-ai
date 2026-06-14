@@ -5,6 +5,7 @@ from fastapi import FastAPI
 
 from opsguard_api.db import init_database
 from opsguard_api.routes.documents import router as documents_router
+from opsguard_api.routes.search import router as search_router
 
 
 @asynccontextmanager
@@ -15,6 +16,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="OpsGuard AI API", lifespan=lifespan)
 app.include_router(documents_router)
+app.include_router(search_router)
 
 
 @app.get("/health")

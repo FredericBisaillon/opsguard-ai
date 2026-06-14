@@ -2,7 +2,7 @@
 
 OpsGuard AI est une plateforme de revue documentaire IA sécurisée, construite progressivement comme projet portfolio backend/IA. Le but est de démontrer une architecture web maintenable, testable et orientée sécurité pour l'ingestion, la recherche et la revue de documents sensibles.
 
-Le projet ne fait pas encore de RAG ni de génération de réponses IA. Le bloc actuel stabilise une base saine: API FastAPI, upload local de documents, extraction de texte minimale, chunking structure-aware, génération d'embeddings de chunks, persistance PostgreSQL/pgvector, migrations Alembic, documentation et tests de base.
+Le projet ne fait pas encore de RAG ni de génération de réponses IA. Le bloc actuel stabilise une base saine: API FastAPI, upload local de documents, extraction de texte minimale, chunking structure-aware, génération d'embeddings de chunks, recherche sémantique pgvector, migrations Alembic, documentation et tests de base.
 
 ## État actuel
 
@@ -18,6 +18,7 @@ Ce qui existe aujourd'hui:
 - `POST /documents/{document_id}/extract-text` pour extraire le texte d'un document uploadé;
 - `POST /documents/{document_id}/chunk` pour découper le texte extrait en chunks;
 - `POST /documents/{document_id}/embed` pour générer et stocker les embeddings des chunks;
+- `POST /search` pour chercher les chunks les plus pertinents par similarité vectorielle;
 - `GET /documents/{document_id}/chunks` pour inspecter les chunks d'un document;
 - `GET /documents` pour lister les documents;
 - une configuration locale de dossier d'upload, dossier d'extraction, taille maximale et limites de chunking;
@@ -27,12 +28,11 @@ Ce qui existe aujourd'hui:
 - Alembic pour versionner le schéma local;
 - le SDK OpenAI pour générer les embeddings;
 - un frontend Next.js minimal;
-- des tests pytest pour `/health`, les documents, l'upload, l'extraction, le chunking et les embeddings.
+- des tests pytest pour `/health`, les documents, l'upload, l'extraction, le chunking, les embeddings et la recherche sémantique.
 
 Ce qui n'existe pas encore:
 
 - OCR pour les PDF scannés;
-- recherche sémantique;
 - RAG ou réponses avec citations;
 - génération LLM/chat;
 - authentification, rôles ou isolation tenant;
@@ -138,12 +138,17 @@ OPENAI_API_KEY=
 EMBEDDING_MODEL=text-embedding-3-small
 EMBEDDING_DIMENSIONS=1536
 EMBEDDING_BATCH_SIZE=64
+
+DEFAULT_SEARCH_TOP_K=5
+MAX_SEARCH_TOP_K=20
+MAX_SEARCH_QUERY_CHARS=1000
 ```
 
 Ne commit jamais de vrais secrets dans `.env`. Le fichier `.env.example` sert uniquement de modèle local.
 Les fichiers téléversés sont sauvegardés localement dans `UPLOAD_DIR`. Les textes extraits sont sauvegardés dans `EXTRACTED_TEXT_DIR`. Les fichiers générés dans `data/uploads/` et `data/extracted/` sont ignorés par Git.
 `CHUNK_MAX_CHARS` et `CHUNK_OVERLAP_CHARS` contrôlent la taille des chunks créés depuis le texte extrait. L'overlap est surtout utilisé lorsque le backend doit couper un bloc trop long.
-`OPENAI_API_KEY` est requis uniquement pour `POST /documents/{document_id}/embed`. `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS` et `EMBEDDING_BATCH_SIZE` contrôlent la génération des embeddings de chunks. La dimension actuelle doit rester `1536`, car la colonne PostgreSQL est typée `vector(1536)`.
+`OPENAI_API_KEY` est requis pour générer les embeddings de chunks et les embeddings de query utilisés par `POST /search`. `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS` et `EMBEDDING_BATCH_SIZE` contrôlent la génération des embeddings de chunks. La dimension actuelle doit rester `1536`, car la colonne PostgreSQL est typée `vector(1536)`.
+`DEFAULT_SEARCH_TOP_K`, `MAX_SEARCH_TOP_K` et `MAX_SEARCH_QUERY_CHARS` contrôlent les limites de la recherche sémantique.
 
 ## Lancer PostgreSQL
 
@@ -337,6 +342,45 @@ Réponse exemple:
 
 L'API ne renvoie jamais les vecteurs complets. En cas de succès, le statut passe à `embedded`. En cas d'échec provider ou stockage après le démarrage du traitement, il passe à `embedding_failed`.
 
+### `POST /search`
+
+Génère un embedding pour la question utilisateur avec le même client d'embeddings que les chunks, puis cherche les chunks les plus proches dans PostgreSQL avec pgvector. Cet endpoint fait uniquement du retrieval: il ne génère pas de réponse finale, n'appelle pas de modèle chat et ne produit pas encore de citations rédigées.
+
+Payload exemple:
+
+```json
+{
+  "query": "Quel est le délai pour signaler un incident ?",
+  "document_id": 2,
+  "top_k": 5
+}
+```
+
+`document_id` est optionnel. S'il est absent, la recherche peut retourner des chunks embedded issus de plusieurs documents. Les chunks sans embedding sont ignorés.
+
+Réponse exemple:
+
+```json
+{
+  "query": "Quel est le délai pour signaler un incident ?",
+  "top_k": 5,
+  "result_count": 1,
+  "results": [
+    {
+      "document_id": 2,
+      "document_title": "Incident Response Policy",
+      "chunk_id": 12,
+      "chunk_index": 3,
+      "section_title": "Incident Reporting",
+      "content": "Security incidents must be reported within 24 hours.",
+      "similarity_score": 0.84
+    }
+  ]
+}
+```
+
+La recherche utilise la distance cosine pgvector (`embedding <=> query_embedding`) et retourne `similarity_score = 1 - distance`. Plus le score est élevé, plus le chunk est proche de la query. Les embeddings complets ne sont jamais renvoyés par l'API.
+
 ### `GET /documents/{document_id}/chunks`
 
 Retourne les chunks persistés d'un document, ordonnés par `chunk_index`. Cet endpoint sert surtout au debug et aux tests tant que l'interface documentaire complète n'existe pas encore.
@@ -383,6 +427,6 @@ Réponse exemple:
 
 Prochains blocs prévus:
 
-1. Ajouter une première recherche sémantique avec pgvector.
-2. Construire une réponse avec citations.
+1. Construire une réponse avec citations à partir des chunks retrouvés.
+2. Ajouter des évaluations retrieval/RAG.
 3. Ajouter les premières tâches de revue et les contrôles de sécurité.

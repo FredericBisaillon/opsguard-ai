@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from opsguard_api.config import Settings, get_settings
 from opsguard_api.db import get_db
+from opsguard_api.dependencies import get_embedding_client
 from opsguard_api.models import Document, DocumentChunk
 from opsguard_api.schemas import (
     DocumentChunkingRead,
@@ -15,19 +16,9 @@ from opsguard_api.schemas import (
     DocumentRead,
 )
 from opsguard_api.services import documents as documents_service
-from opsguard_api.services.embeddings import EmbeddingClient, OpenAIEmbeddingClient
+from opsguard_api.services.embeddings import EmbeddingClient
 
 router = APIRouter(prefix="/documents", tags=["documents"])
-
-
-def get_embedding_client(
-    settings: Settings = Depends(get_settings),
-) -> EmbeddingClient:
-    return OpenAIEmbeddingClient(
-        api_key=settings.openai_api_key,
-        model=settings.embedding_model,
-        dimensions=settings.embedding_dimensions,
-    )
 
 
 @router.post("", response_model=DocumentRead, status_code=status.HTTP_201_CREATED)

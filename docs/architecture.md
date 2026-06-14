@@ -1,8 +1,8 @@
 # Architecture actuelle
 
-Ce document décrit l'architecture actuelle d'OpsGuard AI. Il reflète l'état réel du projet à ce stade: API FastAPI, upload local minimal, extraction de texte locale, chunking structure-aware, embeddings de chunks, validation Pydantic, persistance PostgreSQL/pgvector, migrations Alembic et frontend Next.js minimal.
+Ce document décrit l'architecture actuelle d'OpsGuard AI. Il reflète l'état réel du projet à ce stade: API FastAPI, upload local minimal, extraction de texte locale, chunking structure-aware, embeddings de chunks, recherche sémantique pgvector, validation Pydantic, persistance PostgreSQL/pgvector, migrations Alembic et frontend Next.js minimal.
 
-OpsGuard AI ne fait pas encore d'OCR, de recherche sémantique, de RAG, de génération de réponses LLM, d'authentification ou de multi-tenant.
+OpsGuard AI ne fait pas encore d'OCR, de RAG, de génération de réponses LLM, d'authentification ou de multi-tenant.
 
 ## 1. Vue d'ensemble
 
@@ -23,10 +23,11 @@ Le backend expose actuellement une API HTTP simple:
 - `POST /documents/{document_id}/extract-text`
 - `POST /documents/{document_id}/chunk`
 - `POST /documents/{document_id}/embed`
+- `POST /search`
 - `GET /documents/{document_id}/chunks`
 - `GET /documents`
 
-La base de données locale est PostgreSQL dans Docker. L'image utilisée inclut pgvector, et les embeddings de chunks sont stockés dans `document_chunks.embedding`.
+La base de données locale est PostgreSQL dans Docker. L'image utilisée inclut pgvector, les embeddings de chunks sont stockés dans `document_chunks.embedding`, et `POST /search` utilise cette colonne pour le retrieval vectoriel.
 
 ## 2. Frontend actuel
 
@@ -53,7 +54,7 @@ Technologies:
 - SQLAlchemy pour l'accès relationnel;
 - psycopg comme driver PostgreSQL;
 - pypdf pour l'extraction de texte PDF sans OCR;
-- pgvector pour le type vectoriel PostgreSQL;
+- pgvector pour le type vectoriel PostgreSQL et la recherche cosine;
 - OpenAI SDK pour la génération d'embeddings;
 - Alembic pour les migrations;
 - pytest, ruff et mypy pour la qualité.
@@ -120,6 +121,16 @@ Les schemas Pydantic sont définis dans `opsguard_api.schemas`.
 - `end_char`;
 - `created_at`.
 
+`SemanticSearchRequest` définit l'entrée de `POST /search`:
+
+- `query`: texte obligatoire, trimé et non vide;
+- `document_id`: filtre optionnel vers un document;
+- `top_k`: nombre optionnel de résultats à retourner.
+
+`SemanticSearchResponse` retourne la query, le `top_k` effectivement utilisé, le nombre de résultats et une liste de `SemanticSearchResult`.
+
+Chaque `SemanticSearchResult` expose les métadonnées utiles du chunk retrouvé, dont `document_id`, `document_title`, `chunk_id`, `chunk_index`, `section_title`, `content` et `similarity_score`. Les embeddings complets ne sont pas exposés.
+
 ## 5. Routes vs services
 
 Les routes sont responsables de la couche HTTP:
@@ -138,11 +149,12 @@ Les services contiennent la logique applicative simple:
 - orchestrer l'extraction de texte et les changements de statut;
 - orchestrer le chunking et la persistance des chunks;
 - orchestrer la génération d'embeddings et leur stockage;
+- orchestrer la recherche sémantique;
 - gérer les opérations SQLAlchemy nécessaires.
 
 La lecture concrète des fichiers est isolée dans `opsguard_api.services.extraction`, afin de garder la logique `.md`, `.txt` et `.pdf` hors de la route HTTP.
 La logique de découpage est isolée dans `opsguard_api.services.chunking`. Ce helper ne dépend pas de FastAPI ni de SQLAlchemy: il reçoit du texte et retourne des chunks typés avec section, offsets et taille.
-La logique d'appel provider est isolée dans `opsguard_api.services.embeddings`. Le service documentaire dépend d'un client d'embeddings testable, ce qui permet de mocker OpenAI dans les tests.
+La logique d'appel provider est isolée dans `opsguard_api.services.embeddings`. Les services documentaire et search dépendent d'un client d'embeddings testable, ce qui permet de mocker OpenAI dans les tests.
 
 Cette séparation garde les routes minces et rend la logique métier plus facile à tester et à faire évoluer.
 
@@ -166,7 +178,8 @@ Les schemas Pydantic décrivent les contrats de l'API:
 - `DocumentRead` pour la sortie HTTP;
 - `DocumentExtractionRead` pour l'extraction;
 - `DocumentChunkingRead` et `DocumentChunkRead` pour le chunking;
-- `DocumentEmbeddingRead` pour l'embedding des chunks.
+- `DocumentEmbeddingRead` pour l'embedding des chunks;
+- `SemanticSearchRequest`, `SemanticSearchResult` et `SemanticSearchResponse` pour la recherche sémantique.
 
 Cette séparation évite de lier directement le contrat public de l'API au modèle de persistance. Elle permet aussi d'avoir des règles de validation différentes des contraintes SQL.
 
@@ -336,7 +349,44 @@ En cas d'absence de document, la route retourne `404`. En cas de document non ch
 
 La réponse ne renvoie jamais les vecteurs complets, uniquement le nombre de chunks embedded, le modèle, la dimension et le statut.
 
-## 13. Flow complet de `GET /documents/{document_id}/chunks`
+## 13. Flow complet de `POST /search`
+
+Flux actuel:
+
+```text
+Client
+-> POST /search
+-> validation Pydantic avec SemanticSearchRequest
+-> FastAPI route semantic_search
+-> injection d'une session SQLAlchemy via get_db
+-> lecture de Settings via get_settings
+-> injection d'un client EmbeddingClient
+-> appel du service search_service.semantic_search
+-> validation top_k, longueur de query et dimensions embedding
+-> vérification optionnelle du document_id
+-> retour vide si aucun chunk embedded n'existe dans le scope demandé
+-> génération de l'embedding de query
+-> requête SQLAlchemy sur DocumentChunk join Document
+-> filtre DocumentChunk.embedding IS NOT NULL
+-> filtre document_id si fourni
+-> tri pgvector par distance cosine
+-> LIMIT top_k
+-> conversion distance en similarity_score
+-> sérialisation avec SemanticSearchResponse
+-> réponse HTTP 200
+```
+
+La recherche utilise l'opérateur pgvector de distance cosine, équivalent à:
+
+```sql
+ORDER BY document_chunks.embedding <=> :query_embedding
+```
+
+Le champ retourné est `similarity_score = 1 - distance`. Plus le score est élevé, plus le chunk est proche de la query. Une distance plus petite signifie aussi un meilleur résultat.
+
+Cet endpoint ne fait pas de génération de réponse LLM. Il retourne uniquement les chunks pertinents et leurs métadonnées pour préparer le futur RAG avec citations.
+
+## 14. Flow complet de `GET /documents/{document_id}/chunks`
 
 Flux actuel:
 
@@ -352,9 +402,9 @@ Client
 -> réponse HTTP 200
 ```
 
-Cette route est volontairement simple. Elle aide à vérifier le résultat du chunking avant l'ajout d'un frontend complet et du retrieval. Elle n'expose pas la colonne `embedding`.
+Cette route est volontairement simple. Elle aide à vérifier le résultat du chunking avant l'ajout d'un frontend complet. Elle n'expose pas la colonne `embedding`.
 
-## 14. Flow complet de `GET /documents`
+## 15. Flow complet de `GET /documents`
 
 Flux actuel:
 
@@ -373,7 +423,7 @@ Client
 
 Cette route expose les documents existants en base, sans pagination ni filtres pour l'instant.
 
-## 15. Limites actuelles
+## 16. Limites actuelles
 
 Limites connues:
 
@@ -381,17 +431,16 @@ Limites connues:
 - il n'y a pas encore d'isolation de données par utilisateur ou tenant;
 - il n'y a pas d'OCR pour les PDF scannés;
 - le chunking reste heuristique et ne parse pas encore les tableaux ou structures PDF complexes;
-- il n'y a pas encore de recherche vectorielle;
 - il n'y a pas encore de RAG ni de génération de réponse LLM;
 - la dimension d'embedding est fixée à `1536` côté schéma PostgreSQL;
+- la recherche vectorielle n'a pas encore d'index HNSW ou IVFFlat;
 - l'endpoint d'embedding est synchrone et peut devenir lent sur de gros documents;
 - il n'y a pas encore de gestion d'erreurs avancée, pagination ou observabilité.
 
-## 16. Prochaines étapes
+## 17. Prochaines étapes
 
 Prochaines évolutions techniques recommandées:
 
-1. Construire une recherche sémantique avec pgvector.
-2. Ajouter des réponses avec citations.
+1. Ajouter des réponses avec citations à partir des chunks retrouvés.
+2. Ajouter des évaluations retrieval/RAG et une CI plus complète.
 3. Ajouter auth, rôles et isolation tenant.
-4. Ajouter des évaluations et une CI plus complète.
