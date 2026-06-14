@@ -67,6 +67,7 @@ Chaque source contient:
 - `chunk_index`;
 - `section_title`;
 - `similarity_score`;
+- `detected_prompt_injection_signals`;
 - un extrait du chunk.
 
 Le contexte est borné par:
@@ -74,7 +75,37 @@ Le contexte est borné par:
 - `ANSWER_CONTEXT_MAX_CHARS`;
 - `ANSWER_SOURCE_MAX_CHARS`.
 
-Les embeddings ne sont jamais inclus dans le contexte LLM et ne sont jamais renvoyés par l'API.
+Les sources sont rendues dans un format explicitement délimité:
+
+```text
+----- BEGIN SOURCE S1 -----
+source_id: S1
+source_marker: [S1]
+...
+detected_prompt_injection_signals: none
+----- BEGIN SOURCE S1 CONTENT -----
+...
+----- END SOURCE S1 CONTENT -----
+----- END SOURCE S1 -----
+```
+
+Le prompt utilisateur encadre aussi toute la liste avec `BEGIN/END RETRIEVED SOURCES`.
+
+Les embeddings ne sont jamais inclus dans le contexte LLM et ne sont jamais renvoyés par l'API. Les extraits envoyés au LLM passent par une redaction déterministe des secrets évidents, comme les valeurs assignées à `api_key`, `secret`, `token`, `password` ou `credential`, ainsi que les clés OpenAI au format `sk-...`.
+
+## Durcissement prompt injection
+
+Le prompt système indique que les sources sont des données non fiables. Les instructions présentes dans les chunks ne doivent jamais être suivies, même si elles demandent d'ignorer les instructions précédentes, de changer de rôle, de révéler le prompt système, d'exfiltrer un secret ou d'appeler un outil.
+
+Le service `retrieval` ajoute une détection heuristique locale de signaux de prompt injection. Cette détection retourne des libellés stables, par exemple:
+
+- `ignore_previous_instructions`;
+- `role_override`;
+- `system_prompt_exfiltration`;
+- `secret_exfiltration`;
+- `tool_or_external_action`.
+
+Ces signaux sont annotatifs. Ils ne bloquent pas automatiquement un chunk, ne déclenchent pas de judge LLM, ne font aucun tool calling et ne dupliquent pas la recherche vectorielle.
 
 ## Prompt et sortie LLM
 

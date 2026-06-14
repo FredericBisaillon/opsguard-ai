@@ -417,7 +417,9 @@ Client
 -> génération de l'embedding de query par le client d'embeddings
 -> recherche pgvector des chunks les plus proches
 -> construction de sources contrôlées S1, S2, etc.
--> construction d'un prompt avec question + contexte borné
+-> redaction des secrets évidents dans les extraits de sources
+-> détection heuristique de signaux de prompt injection dans les chunks
+-> construction d'un prompt avec question + contexte borné et délimité
 -> appel du LLM client
 -> validation de la sortie JSON is_answered / answer / citations
 -> validation que les citations demandées existent dans le contexte
@@ -432,7 +434,16 @@ Le contexte envoyé au LLM est borné par:
 - `ANSWER_CONTEXT_MAX_CHARS` pour le contexte total;
 - `ANSWER_SOURCE_MAX_CHARS` pour l'extrait de chaque chunk.
 
-Chaque source reçoit un identifiant local au contexte (`S1`, `S2`, etc.) et contient le titre du document, l'id du chunk, l'index du chunk, la section, le score de similarité et l'extrait. Les embeddings ne sont pas inclus dans le prompt et ne sont jamais renvoyés dans la réponse.
+Chaque source reçoit un identifiant local au contexte (`S1`, `S2`, etc.) et contient le titre du document, l'id du chunk, l'index du chunk, la section, le score de similarité, un champ `detected_prompt_injection_signals` et l'extrait. Les embeddings ne sont pas inclus dans le prompt et ne sont jamais renvoyés dans la réponse.
+
+Le contexte est délimité à deux niveaux:
+
+- `BEGIN/END RETRIEVED SOURCES` encadre toute la liste;
+- `BEGIN/END SOURCE` et `BEGIN/END SOURCE <id> CONTENT` encadrent chaque source et son texte non fiable.
+
+Le prompt système précise que les sources sont des données non fiables et que leurs instructions ne doivent jamais être suivies. La détection de prompt injection est volontairement simple et locale: elle cherche des motifs comme l'ignorance d'instructions précédentes, la prise de rôle, la révélation du prompt système, l'exfiltration de secrets ou l'appel à des outils externes. Les signaux sont transmis comme avertissements au LLM; ils ne déclenchent pas de judge LLM, ne refont pas de retrieval et ne changent pas la recherche pgvector.
+
+Avant troncature, les extraits de sources passent aussi par une redaction déterministe des secrets évidents, par exemple les valeurs assignées à `api_key`, `secret`, `token`, `password` ou `credential`, ainsi que les clés OpenAI au format `sk-...`.
 
 L'abstention est forcée côté service dans les cas suivants:
 

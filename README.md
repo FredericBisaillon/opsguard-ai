@@ -19,7 +19,7 @@ Ce qui existe aujourd'hui:
 - `POST /documents/{document_id}/chunk` pour découper le texte extrait en chunks;
 - `POST /documents/{document_id}/embed` pour générer et stocker les embeddings des chunks;
 - `POST /search` pour chercher les chunks les plus pertinents par similarité vectorielle;
-- `POST /answer` pour générer une réponse avec citations à partir des chunks retrouvés;
+- `POST /answer` pour générer une réponse avec citations à partir des chunks retrouvés, avec contexte délimité et durcissement prompt injection;
 - un harness d'évaluation RAG minimal avec dataset JSONL, métriques simples et rapports locaux;
 - `GET /documents/{document_id}/chunks` pour inspecter les chunks d'un document;
 - `GET /documents` pour lister les documents;
@@ -154,7 +154,7 @@ Les fichiers téléversés sont sauvegardés localement dans `UPLOAD_DIR`. Les t
 `CHUNK_MAX_CHARS` et `CHUNK_OVERLAP_CHARS` contrôlent la taille des chunks créés depuis le texte extrait. L'overlap est surtout utilisé lorsque le backend doit couper un bloc trop long.
 `OPENAI_API_KEY` est requis pour générer les embeddings de chunks, les embeddings de query utilisés par `POST /search`, et les réponses LLM de `POST /answer`. `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS` et `EMBEDDING_BATCH_SIZE` contrôlent la génération des embeddings de chunks. La dimension actuelle doit rester `1536`, car la colonne PostgreSQL est typée `vector(1536)`.
 `DEFAULT_SEARCH_TOP_K`, `MAX_SEARCH_TOP_K` et `MAX_SEARCH_QUERY_CHARS` contrôlent les limites de la recherche sémantique.
-`LLM_MODEL` choisit le modèle chat utilisé par `POST /answer`. `ANSWER_CONTEXT_MAX_CHARS` limite le contexte total transmis au LLM, et `ANSWER_SOURCE_MAX_CHARS` limite l'extrait de chaque chunk cité.
+`LLM_MODEL` choisit le modèle chat utilisé par `POST /answer`. `ANSWER_CONTEXT_MAX_CHARS` limite le contexte total transmis au LLM, et `ANSWER_SOURCE_MAX_CHARS` limite l'extrait de chaque chunk cité. Le contexte RAG est borné par source avec des marqueurs `BEGIN/END SOURCE`; les textes de sources sont traités comme des données non fiables, jamais comme des instructions.
 
 ## Lancer PostgreSQL
 
@@ -417,6 +417,15 @@ La recherche utilise la distance cosine pgvector (`embedding <=> query_embedding
 ### `POST /answer`
 
 Réutilise la recherche sémantique existante pour récupérer les chunks pertinents, construit un contexte contrôlé, puis appelle un client LLM injectable pour produire une réponse JSON avec citations. L'endpoint ne fait pas d'agentique, de tool calling, de LangGraph ou de job en arrière-plan.
+
+Le contexte envoyé au LLM est explicitement délimité:
+
+- la liste complète est encadrée par `BEGIN/END RETRIEVED SOURCES`;
+- chaque chunk est encadré par `BEGIN/END SOURCE`;
+- le contenu textuel du chunk est encadré par `BEGIN/END SOURCE <id> CONTENT`;
+- chaque source porte un champ `detected_prompt_injection_signals`.
+
+Le prompt système rappelle que les sources sont des données non fiables. Les instructions présentes dans les chunks, par exemple ignorer les instructions précédentes, révéler le prompt système, exfiltrer des secrets ou appeler un outil, doivent être ignorées. La détection est heuristique et annotative: elle n'ajoute ni judge LLM ni second retrieval, et elle ne bloque pas automatiquement un chunk. Les secrets évidents de type clé API, token, mot de passe ou credential assigné sont redigés dans les extraits envoyés au LLM et dans les citations retournées.
 
 Payload exemple:
 
