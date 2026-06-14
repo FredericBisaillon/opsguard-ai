@@ -2,7 +2,7 @@
 
 OpsGuard AI est une plateforme de revue documentaire IA sécurisée, construite progressivement comme projet portfolio backend/IA. Le but est de démontrer une architecture web maintenable, testable et orientée sécurité pour l'ingestion, la recherche et la revue de documents sensibles.
 
-Le projet possède maintenant un premier bloc RAG backend: ingestion documentaire locale, extraction de texte minimale, chunking structure-aware, génération d'embeddings de chunks, recherche sémantique pgvector, réponse LLM avec citations de chunks, abstention contrôlée, migrations Alembic, documentation et tests de base.
+Le projet possède maintenant un premier bloc RAG backend: ingestion documentaire locale, extraction de texte minimale, chunking structure-aware, génération d'embeddings de chunks, recherche sémantique pgvector, réponse LLM avec citations de chunks, abstention contrôlée, tâches de revue métier manuelles, migrations Alembic, documentation et tests de base.
 
 ## État actuel
 
@@ -12,6 +12,7 @@ Ce qui existe aujourd'hui:
 - une API FastAPI avec `GET /health`;
 - un modèle `Document` SQLAlchemy;
 - un modèle `DocumentChunk` SQLAlchemy;
+- un modèle `ReviewTask` SQLAlchemy pour représenter des points de revue liés à un document ou à un chunk;
 - des schemas Pydantic pour créer et lire des documents;
 - `POST /documents` pour créer une entrée documentaire;
 - `POST /documents/upload` pour téléverser un PDF, Markdown ou texte brut localement;
@@ -20,6 +21,7 @@ Ce qui existe aujourd'hui:
 - `POST /documents/{document_id}/embed` pour générer et stocker les embeddings des chunks;
 - `POST /search` pour chercher les chunks les plus pertinents par similarité vectorielle;
 - `POST /answer` pour générer une réponse avec citations à partir des chunks retrouvés, avec contexte délimité et durcissement prompt injection;
+- `POST /review-tasks`, `GET /review-tasks`, `GET /review-tasks/{task_id}`, `PATCH /review-tasks/{task_id}` et `POST /review-tasks/{task_id}/dismiss` pour gérer des tâches de revue manuelles;
 - un harness d'évaluation RAG minimal avec dataset JSONL, métriques simples et rapports locaux;
 - `GET /documents/{document_id}/chunks` pour inspecter les chunks d'un document;
 - `GET /documents` pour lister les documents;
@@ -30,12 +32,13 @@ Ce qui existe aujourd'hui:
 - Alembic pour versionner le schéma local;
 - le SDK OpenAI pour générer les embeddings et les réponses LLM;
 - un frontend Next.js minimal;
-- des tests pytest pour `/health`, les documents, l'upload, l'extraction, le chunking, les embeddings, la recherche sémantique et les réponses RAG.
+- des tests pytest pour `/health`, les documents, l'upload, l'extraction, le chunking, les embeddings, la recherche sémantique, les réponses RAG et les tâches de revue.
 
 Ce qui n'existe pas encore:
 
 - OCR pour les PDF scannés;
 - agentique, tool calling ou LangGraph;
+- création automatique de tâches par LLM;
 - authentification, rôles ou isolation tenant;
 - dashboard frontend complet;
 - CI complète.
@@ -186,7 +189,7 @@ L'API est disponible par défaut sur:
 http://127.0.0.1:8000
 ```
 
-Au démarrage local, l'API applique les migrations Alembic jusqu'à `head`. La première migration active l'extension PostgreSQL `vector`, crée les tables documentaires et ajoute `document_chunks.embedding vector(1536)`.
+Au démarrage local, l'API applique les migrations Alembic jusqu'à `head`. La première migration active l'extension PostgreSQL `vector`, crée les tables documentaires et ajoute `document_chunks.embedding vector(1536)`. La migration suivante crée `review_tasks` avec ses liens document/chunk et ses contraintes de valeurs contrôlées.
 
 ## Lancer le frontend
 
@@ -474,6 +477,76 @@ Si aucun chunk n'est récupéré, si le LLM indique que les sources sont insuffi
 
 Les citations sont basées sur les chunks du contexte (`S1`, `S2`, etc.) et incluent seulement des métadonnées utiles et un extrait borné. Les embeddings complets ne sont jamais renvoyés.
 
+### `POST /review-tasks`
+
+Crée une tâche de revue manuelle liée à un document, et optionnellement à un chunk précis. Cet endpoint ne fait aucun appel LLM et ne crée pas de tâche automatiquement.
+
+Payload exemple:
+
+```json
+{
+  "document_id": 2,
+  "chunk_id": 12,
+  "title": "Clause MFA potentiellement incomplète",
+  "description": "Vérifier si la politique précise les exceptions et la fréquence de revue.",
+  "severity": "high",
+  "status": "open"
+}
+```
+
+Valeurs acceptées:
+
+- `severity`: `low`, `medium`, `high`, `critical`;
+- `status`: `open`, `in_progress`, `resolved`, `dismissed`;
+- `source`: `manual` ou `ai_suggested`, mais la création API actuelle force `manual`.
+
+Validation métier:
+
+- document inexistant: `404`;
+- chunk inexistant: `404`;
+- chunk appartenant à un autre document: `400`;
+- titre ou description vide après trim: `422`;
+- `severity` ou `status` invalide: `422`.
+
+Réponse exemple:
+
+```json
+{
+  "id": 1,
+  "document_id": 2,
+  "chunk_id": 12,
+  "title": "Clause MFA potentiellement incomplète",
+  "description": "Vérifier si la politique précise les exceptions et la fréquence de revue.",
+  "severity": "high",
+  "status": "open",
+  "source": "manual",
+  "created_at": "2026-06-14T12:00:00Z",
+  "updated_at": "2026-06-14T12:00:00Z"
+}
+```
+
+### `GET /review-tasks`
+
+Liste les tâches de revue. Les filtres optionnels sont `document_id`, `status` et `severity`.
+
+Exemple:
+
+```text
+GET /review-tasks?document_id=2&status=open&severity=high
+```
+
+### `GET /review-tasks/{task_id}`
+
+Retourne une tâche de revue par identifiant.
+
+### `PATCH /review-tasks/{task_id}`
+
+Met à jour partiellement `title`, `description`, `severity` ou `status`. `description` peut être mise à `null`; `title`, `severity` et `status` ne peuvent pas être mis à `null`.
+
+### `POST /review-tasks/{task_id}/dismiss`
+
+Marque une tâche comme `dismissed`. Il n'y a pas de suppression physique dans ce bloc afin de préserver l'historique métier minimal.
+
 ### `GET /documents/{document_id}/chunks`
 
 Retourne les chunks persistés d'un document, ordonnés par `chunk_index`. Cet endpoint sert surtout au debug et aux tests tant que l'interface documentaire complète n'existe pas encore.
@@ -520,6 +593,6 @@ Réponse exemple:
 
 Prochains blocs prévus:
 
-1. Ajouter des évaluations retrieval/RAG.
-2. Ajouter les premières tâches de revue et les contrôles de sécurité.
+1. Enrichir progressivement les évaluations retrieval/RAG.
+2. Utiliser les `review_tasks` comme ressource métier pour un futur tool calling contrôlé.
 3. Ajouter l'authentification et l'isolation tenant avant tout usage multi-utilisateur.

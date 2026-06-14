@@ -1,8 +1,8 @@
 # Architecture actuelle
 
-Ce document décrit l'architecture actuelle d'OpsGuard AI. Il reflète l'état réel du projet à ce stade: API FastAPI, upload local minimal, extraction de texte locale, chunking structure-aware, embeddings de chunks, recherche sémantique pgvector, réponses RAG avec citations, validation Pydantic, persistance PostgreSQL/pgvector, migrations Alembic et frontend Next.js minimal.
+Ce document décrit l'architecture actuelle d'OpsGuard AI. Il reflète l'état réel du projet à ce stade: API FastAPI, upload local minimal, extraction de texte locale, chunking structure-aware, embeddings de chunks, recherche sémantique pgvector, réponses RAG avec citations, tâches de revue manuelles, validation Pydantic, persistance PostgreSQL/pgvector, migrations Alembic et frontend Next.js minimal.
 
-OpsGuard AI ne fait pas encore d'OCR, d'agentique, de tool calling, de LangGraph, d'authentification ou de multi-tenant.
+OpsGuard AI ne fait pas encore d'OCR, d'agentique, de tool calling, de LangGraph, de création automatique de tâches par LLM, d'authentification ou de multi-tenant.
 
 ## 1. Vue d'ensemble
 
@@ -25,10 +25,15 @@ Le backend expose actuellement une API HTTP simple:
 - `POST /documents/{document_id}/embed`
 - `POST /search`
 - `POST /answer`
+- `POST /review-tasks`
+- `GET /review-tasks`
+- `GET /review-tasks/{task_id}`
+- `PATCH /review-tasks/{task_id}`
+- `POST /review-tasks/{task_id}/dismiss`
 - `GET /documents/{document_id}/chunks`
 - `GET /documents`
 
-La base de données locale est PostgreSQL dans Docker. L'image utilisée inclut pgvector, les embeddings de chunks sont stockés dans `document_chunks.embedding`, et `POST /search` utilise cette colonne pour le retrieval vectoriel. `POST /answer` réutilise ce retrieval, construit un contexte borné, puis appelle un client LLM injectable pour produire une réponse citée ou une abstention.
+La base de données locale est PostgreSQL dans Docker. L'image utilisée inclut pgvector, les embeddings de chunks sont stockés dans `document_chunks.embedding`, et `POST /search` utilise cette colonne pour le retrieval vectoriel. `POST /answer` réutilise ce retrieval, construit un contexte borné, puis appelle un client LLM injectable pour produire une réponse citée ou une abstention. Les tâches de revue sont stockées dans `review_tasks` et restent créées manuellement pour ce bloc.
 
 ## 2. Frontend actuel
 
@@ -122,6 +127,24 @@ Les schemas Pydantic sont définis dans `opsguard_api.schemas`.
 - `end_char`;
 - `created_at`.
 
+`ReviewTaskCreate` définit l'entrée de `POST /review-tasks`:
+
+- `document_id`: document obligatoire;
+- `chunk_id`: chunk optionnel;
+- `title`: texte obligatoire entre 1 et 255 caractères, trimé et non vide;
+- `description`: texte optionnel, trimé et non vide si fourni;
+- `severity`: `low`, `medium`, `high` ou `critical`, avec `medium` par défaut;
+- `status`: `open`, `in_progress`, `resolved` ou `dismissed`, avec `open` par défaut.
+
+`ReviewTaskUpdate` définit les champs modifiables par `PATCH /review-tasks/{task_id}`:
+
+- `title`;
+- `description`;
+- `severity`;
+- `status`.
+
+`ReviewTaskRead` expose la tâche persistée avec `source`, `created_at` et `updated_at`. La création API actuelle force `source = manual`; `ai_suggested` est réservé pour un futur bloc de tool calling contrôlé.
+
 `SemanticSearchRequest` définit l'entrée de `POST /search`:
 
 - `query`: texte obligatoire, trimé et non vide;
@@ -160,12 +183,14 @@ Les services contiennent la logique applicative simple:
 - orchestrer la génération d'embeddings et leur stockage;
 - orchestrer la recherche sémantique;
 - orchestrer les réponses RAG avec contexte contrôlé, abstention et citations;
+- gérer les tâches de revue, dont la validation document/chunk;
 - gérer les opérations SQLAlchemy nécessaires.
 
 La lecture concrète des fichiers est isolée dans `opsguard_api.services.extraction`, afin de garder la logique `.md`, `.txt` et `.pdf` hors de la route HTTP.
 La logique de découpage est isolée dans `opsguard_api.services.chunking`. Ce helper ne dépend pas de FastAPI ni de SQLAlchemy: il reçoit du texte et retourne des chunks typés avec section, offsets et taille.
 La logique d'appel provider est isolée dans `opsguard_api.services.embeddings`. Les services documentaire et search dépendent d'un client d'embeddings testable, ce qui permet de mocker OpenAI dans les tests.
 La logique de réponse est isolée dans `opsguard_api.services.answer`. Elle appelle `opsguard_api.services.retrieval`, qui réutilise `search_service.semantic_search` et transforme les chunks récupérés en sources `S1`, `S2`, etc. Le client LLM est isolé dans `opsguard_api.services.llm` et reste injectable pour les tests.
+La logique des tâches de revue est isolée dans `opsguard_api.services.review_tasks`. La route ne vérifie pas directement les relations document/chunk: elle valide le contrat HTTP, puis délègue au service.
 
 Cette séparation garde les routes minces et rend la logique métier plus facile à tester et à faire évoluer.
 
@@ -175,13 +200,27 @@ Le modèle SQLAlchemy `Document` décrit la table persistée en base:
 
 - nom de table: `documents`;
 - colonnes: `id`, `title`, `source_type`, `source_path`, `status`, `created_at`, `updated_at`.
+- relations vers `DocumentChunk` et `ReviewTask`.
 
 Le modèle SQLAlchemy `DocumentChunk` décrit les chunks persistés:
 
 - nom de table: `document_chunks`;
 - colonnes: `id`, `document_id`, `chunk_index`, `content`, `character_count`, `section_title`, `start_char`, `end_char`, `embedding`, `created_at`;
 - relation plusieurs-à-un vers `Document`;
+- relation optionnelle inverse vers les `ReviewTask` qui ciblent ce chunk;
 - contrainte unique `(document_id, chunk_index)`.
+
+Le modèle SQLAlchemy `ReviewTask` décrit les tâches de revue métier:
+
+- nom de table: `review_tasks`;
+- colonnes: `id`, `document_id`, `chunk_id`, `title`, `description`, `severity`, `status`, `source`, `created_at`, `updated_at`;
+- relation obligatoire vers `Document`;
+- relation optionnelle vers `DocumentChunk`;
+- `severity` contrôlé par `low`, `medium`, `high`, `critical`;
+- `status` contrôlé par `open`, `in_progress`, `resolved`, `dismissed`;
+- `source` contrôlé par `manual`, `ai_suggested`.
+
+Si un document est supprimé, ses tâches sont supprimées avec lui. Si un chunk est supprimé ou recréé, le lien `chunk_id` de la tâche est mis à `NULL`, ce qui garde la tâche au niveau document.
 
 Les schemas Pydantic décrivent les contrats de l'API:
 
@@ -190,7 +229,8 @@ Les schemas Pydantic décrivent les contrats de l'API:
 - `DocumentExtractionRead` pour l'extraction;
 - `DocumentChunkingRead` et `DocumentChunkRead` pour le chunking;
 - `DocumentEmbeddingRead` pour l'embedding des chunks;
-- `SemanticSearchRequest`, `SemanticSearchResult` et `SemanticSearchResponse` pour la recherche sémantique.
+- `ReviewTaskCreate`, `ReviewTaskUpdate` et `ReviewTaskRead` pour les tâches de revue;
+- `SemanticSearchRequest`, `SemanticSearchResult` et `SemanticSearchResponse` pour la recherche sémantique;
 - `AnswerRequest`, `AnswerCitation` et `AnswerResponse` pour les réponses RAG citées.
 
 Cette séparation évite de lier directement le contrat public de l'API au modèle de persistance. Elle permet aussi d'avoir des règles de validation différentes des contraintes SQL.
@@ -225,7 +265,7 @@ La migration initiale exécute:
 CREATE EXTENSION IF NOT EXISTS vector
 ```
 
-Elle crée aussi la colonne `document_chunks.embedding vector(1536)`. Les migrations peuvent être lancées explicitement avec `uv run alembic upgrade head` depuis `apps/api`.
+Elle crée aussi la colonne `document_chunks.embedding vector(1536)`. La migration suivante crée `review_tasks`, ses index `document_id` et `chunk_id`, ses foreign keys et ses contraintes `CHECK` sur `severity`, `status` et `source`. Les migrations peuvent être lancées explicitement avec `uv run alembic upgrade head` depuis `apps/api`.
 
 ## 8. Flow complet de `POST /documents`
 
@@ -455,7 +495,41 @@ L'abstention est forcée côté service dans les cas suivants:
 
 Dans ces cas, l'API retourne `is_answered = false`, la réponse d'abstention standard et une liste de citations vide.
 
-## 15. Flow complet de `GET /documents/{document_id}/chunks`
+## 15. Flow complet de `POST /review-tasks`
+
+Flux actuel:
+
+```text
+Client
+-> POST /review-tasks
+-> validation Pydantic avec ReviewTaskCreate
+-> FastAPI route create_review_task
+-> injection d'une session SQLAlchemy via get_db
+-> appel du service review_tasks_service.create_review_task
+-> vérification que Document existe
+-> si chunk_id est fourni, vérification que DocumentChunk existe
+-> vérification que DocumentChunk.document_id correspond au document_id fourni
+-> création d'un ReviewTask avec source = manual
+-> db.add(task)
+-> db.commit()
+-> db.refresh(task)
+-> sérialisation avec ReviewTaskRead
+-> réponse HTTP 201
+```
+
+Le service retourne:
+
+- `404` si le document n'existe pas;
+- `404` si le chunk fourni n'existe pas;
+- `400` si le chunk existe mais appartient à un autre document.
+
+Les valeurs invalides de `severity` ou `status` sont rejetées par Pydantic avant l'appel du service. La table applique aussi des contraintes `CHECK` pour éviter qu'une écriture hors API stocke des valeurs inattendues.
+
+La liste `GET /review-tasks` accepte les filtres optionnels `document_id`, `status` et `severity`. `PATCH /review-tasks/{task_id}` modifie seulement `title`, `description`, `severity` et `status`. `POST /review-tasks/{task_id}/dismiss` met `status = dismissed` sans suppression physique.
+
+Ce bloc ne crée aucune tâche via LLM. Le champ `source = ai_suggested` existe seulement pour préparer une future intégration de tool calling contrôlé.
+
+## 16. Flow complet de `GET /documents/{document_id}/chunks`
 
 Flux actuel:
 
@@ -473,7 +547,7 @@ Client
 
 Cette route est volontairement simple. Elle aide à vérifier le résultat du chunking avant l'ajout d'un frontend complet. Elle n'expose pas la colonne `embedding`.
 
-## 16. Flow complet de `GET /documents`
+## 17. Flow complet de `GET /documents`
 
 Flux actuel:
 
@@ -492,24 +566,26 @@ Client
 
 Cette route expose les documents existants en base, sans pagination ni filtres pour l'instant.
 
-## 17. Limites actuelles
+## 18. Limites actuelles
 
 Limites connues:
 
 - les tests utilisent la base configurée par `DATABASE_URL`;
 - il n'y a pas encore d'isolation de données par utilisateur ou tenant;
 - il n'y a pas d'OCR pour les PDF scannés;
+- les tâches de revue sont créées manuellement et ne sont pas encore proposées par LLM;
 - le chunking reste heuristique et ne parse pas encore les tableaux ou structures PDF complexes;
 - le RAG actuel est synchrone, sans agentique, tool calling, LangGraph ou queue;
 - la dimension d'embedding est fixée à `1536` côté schéma PostgreSQL;
 - la recherche vectorielle n'a pas encore d'index HNSW ou IVFFlat;
 - l'endpoint d'embedding est synchrone et peut devenir lent sur de gros documents;
-- il n'y a pas encore de gestion d'erreurs avancée, pagination ou observabilité.
+- il n'y a pas encore de workflow d'approbation, assignation, audit log complet, pagination ou observabilité avancée.
 
-## 18. Prochaines étapes
+## 19. Prochaines étapes
 
 Prochaines évolutions techniques recommandées:
 
-1. Ajouter des évaluations retrieval/RAG et une CI plus complète.
-2. Ajouter auth, rôles et isolation tenant.
-3. Ajouter un index vectoriel quand le volume de chunks le justifie.
+1. Enrichir les évaluations retrieval/RAG et ajouter une CI plus complète.
+2. Utiliser `review_tasks` comme ressource métier cible pour un futur tool calling contrôlé.
+3. Ajouter auth, rôles et isolation tenant.
+4. Ajouter un index vectoriel quand le volume de chunks le justifie.

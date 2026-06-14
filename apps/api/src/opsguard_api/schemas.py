@@ -1,8 +1,13 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from opsguard_api.models import DocumentStatus
+from opsguard_api.models import (
+    DocumentStatus,
+    ReviewTaskSeverity,
+    ReviewTaskSource,
+    ReviewTaskStatus,
+)
 
 
 class DocumentCreate(BaseModel):
@@ -63,6 +68,91 @@ class DocumentChunkRead(BaseModel):
     start_char: int | None
     end_char: int | None
     created_at: datetime
+
+
+class ReviewTaskCreate(BaseModel):
+    document_id: int = Field(gt=0)
+    chunk_id: int | None = Field(default=None, gt=0)
+    title: str = Field(min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=4000)
+    severity: ReviewTaskSeverity = ReviewTaskSeverity.MEDIUM
+    status: ReviewTaskStatus = ReviewTaskStatus.OPEN
+
+    @field_validator("title")
+    @classmethod
+    def title_must_not_be_blank(cls, value: str) -> str:
+        title = value.strip()
+        if not title:
+            raise ValueError("Title cannot be empty.")
+        return title
+
+    @field_validator("description")
+    @classmethod
+    def description_must_not_be_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+
+        description = value.strip()
+        if not description:
+            raise ValueError("Description cannot be empty.")
+        return description
+
+
+class ReviewTaskUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=4000)
+    severity: ReviewTaskSeverity | None = None
+    status: ReviewTaskStatus | None = None
+
+    @model_validator(mode="after")
+    def required_fields_must_not_be_null(self) -> "ReviewTaskUpdate":
+        null_fields = [
+            field_name
+            for field_name in ("title", "severity", "status")
+            if field_name in self.model_fields_set
+            and getattr(self, field_name) is None
+        ]
+        if null_fields:
+            raise ValueError(f"{', '.join(null_fields)} cannot be null.")
+
+        return self
+
+    @field_validator("title")
+    @classmethod
+    def title_must_not_be_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+
+        title = value.strip()
+        if not title:
+            raise ValueError("Title cannot be empty.")
+        return title
+
+    @field_validator("description")
+    @classmethod
+    def description_must_not_be_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+
+        description = value.strip()
+        if not description:
+            raise ValueError("Description cannot be empty.")
+        return description
+
+
+class ReviewTaskRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    document_id: int
+    chunk_id: int | None
+    title: str
+    description: str | None
+    severity: ReviewTaskSeverity
+    status: ReviewTaskStatus
+    source: ReviewTaskSource
+    created_at: datetime
+    updated_at: datetime
 
 
 class SemanticSearchRequest(BaseModel):
