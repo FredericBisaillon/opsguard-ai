@@ -94,3 +94,36 @@ class SemanticSearchResponse(BaseModel):
     top_k: int
     result_count: int
     results: list[SemanticSearchResult]
+
+
+class AnswerRequest(BaseModel):
+    query: str = Field(min_length=1)
+    document_id: int | None = Field(default=None, gt=0)
+    top_k: int | None = Field(default=None, ge=1)
+
+    @field_validator("query")
+    @classmethod
+    def query_must_not_be_blank(cls, value: str) -> str:
+        query = value.strip()
+        if not query:
+            raise ValueError("Query cannot be empty.")
+        return query
+
+
+class AnswerCitation(BaseModel):
+    source_id: str
+    document_id: int
+    document_title: str
+    chunk_id: int
+    chunk_index: int
+    section_title: str | None
+    excerpt: str
+    similarity_score: float
+
+
+class AnswerResponse(BaseModel):
+    query: str
+    answer: str
+    is_answered: bool
+    citations: list[AnswerCitation]
+    retrieved_chunk_count: int

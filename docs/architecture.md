@@ -1,8 +1,8 @@
 # Architecture actuelle
 
-Ce document décrit l'architecture actuelle d'OpsGuard AI. Il reflète l'état réel du projet à ce stade: API FastAPI, upload local minimal, extraction de texte locale, chunking structure-aware, embeddings de chunks, recherche sémantique pgvector, validation Pydantic, persistance PostgreSQL/pgvector, migrations Alembic et frontend Next.js minimal.
+Ce document décrit l'architecture actuelle d'OpsGuard AI. Il reflète l'état réel du projet à ce stade: API FastAPI, upload local minimal, extraction de texte locale, chunking structure-aware, embeddings de chunks, recherche sémantique pgvector, réponses RAG avec citations, validation Pydantic, persistance PostgreSQL/pgvector, migrations Alembic et frontend Next.js minimal.
 
-OpsGuard AI ne fait pas encore d'OCR, de RAG, de génération de réponses LLM, d'authentification ou de multi-tenant.
+OpsGuard AI ne fait pas encore d'OCR, d'agentique, de tool calling, de LangGraph, d'authentification ou de multi-tenant.
 
 ## 1. Vue d'ensemble
 
@@ -24,10 +24,11 @@ Le backend expose actuellement une API HTTP simple:
 - `POST /documents/{document_id}/chunk`
 - `POST /documents/{document_id}/embed`
 - `POST /search`
+- `POST /answer`
 - `GET /documents/{document_id}/chunks`
 - `GET /documents`
 
-La base de données locale est PostgreSQL dans Docker. L'image utilisée inclut pgvector, les embeddings de chunks sont stockés dans `document_chunks.embedding`, et `POST /search` utilise cette colonne pour le retrieval vectoriel.
+La base de données locale est PostgreSQL dans Docker. L'image utilisée inclut pgvector, les embeddings de chunks sont stockés dans `document_chunks.embedding`, et `POST /search` utilise cette colonne pour le retrieval vectoriel. `POST /answer` réutilise ce retrieval, construit un contexte borné, puis appelle un client LLM injectable pour produire une réponse citée ou une abstention.
 
 ## 2. Frontend actuel
 
@@ -55,7 +56,7 @@ Technologies:
 - psycopg comme driver PostgreSQL;
 - pypdf pour l'extraction de texte PDF sans OCR;
 - pgvector pour le type vectoriel PostgreSQL et la recherche cosine;
-- OpenAI SDK pour la génération d'embeddings;
+- OpenAI SDK pour la génération d'embeddings et les réponses LLM;
 - Alembic pour les migrations;
 - pytest, ruff et mypy pour la qualité.
 
@@ -131,6 +132,14 @@ Les schemas Pydantic sont définis dans `opsguard_api.schemas`.
 
 Chaque `SemanticSearchResult` expose les métadonnées utiles du chunk retrouvé, dont `document_id`, `document_title`, `chunk_id`, `chunk_index`, `section_title`, `content` et `similarity_score`. Les embeddings complets ne sont pas exposés.
 
+`AnswerRequest` définit l'entrée de `POST /answer`:
+
+- `query`: texte obligatoire, trimé et non vide;
+- `document_id`: filtre optionnel vers un document;
+- `top_k`: nombre optionnel de chunks à récupérer via le search existant.
+
+`AnswerResponse` retourne la query, le texte de réponse, `is_answered`, les citations retenues et `retrieved_chunk_count`. Chaque citation expose `source_id`, les métadonnées du chunk et un `excerpt` borné, jamais le vecteur d'embedding.
+
 ## 5. Routes vs services
 
 Les routes sont responsables de la couche HTTP:
@@ -150,11 +159,13 @@ Les services contiennent la logique applicative simple:
 - orchestrer le chunking et la persistance des chunks;
 - orchestrer la génération d'embeddings et leur stockage;
 - orchestrer la recherche sémantique;
+- orchestrer les réponses RAG avec contexte contrôlé, abstention et citations;
 - gérer les opérations SQLAlchemy nécessaires.
 
 La lecture concrète des fichiers est isolée dans `opsguard_api.services.extraction`, afin de garder la logique `.md`, `.txt` et `.pdf` hors de la route HTTP.
 La logique de découpage est isolée dans `opsguard_api.services.chunking`. Ce helper ne dépend pas de FastAPI ni de SQLAlchemy: il reçoit du texte et retourne des chunks typés avec section, offsets et taille.
 La logique d'appel provider est isolée dans `opsguard_api.services.embeddings`. Les services documentaire et search dépendent d'un client d'embeddings testable, ce qui permet de mocker OpenAI dans les tests.
+La logique de réponse est isolée dans `opsguard_api.services.answer`. Elle appelle `opsguard_api.services.retrieval`, qui réutilise `search_service.semantic_search` et transforme les chunks récupérés en sources `S1`, `S2`, etc. Le client LLM est isolé dans `opsguard_api.services.llm` et reste injectable pour les tests.
 
 Cette séparation garde les routes minces et rend la logique métier plus facile à tester et à faire évoluer.
 
@@ -180,6 +191,7 @@ Les schemas Pydantic décrivent les contrats de l'API:
 - `DocumentChunkingRead` et `DocumentChunkRead` pour le chunking;
 - `DocumentEmbeddingRead` pour l'embedding des chunks;
 - `SemanticSearchRequest`, `SemanticSearchResult` et `SemanticSearchResponse` pour la recherche sémantique.
+- `AnswerRequest`, `AnswerCitation` et `AnswerResponse` pour les réponses RAG citées.
 
 Cette séparation évite de lier directement le contrat public de l'API au modèle de persistance. Elle permet aussi d'avoir des règles de validation différentes des contraintes SQL.
 
@@ -384,9 +396,55 @@ ORDER BY document_chunks.embedding <=> :query_embedding
 
 Le champ retourné est `similarity_score = 1 - distance`. Plus le score est élevé, plus le chunk est proche de la query. Une distance plus petite signifie aussi un meilleur résultat.
 
-Cet endpoint ne fait pas de génération de réponse LLM. Il retourne uniquement les chunks pertinents et leurs métadonnées pour préparer le futur RAG avec citations.
+Cet endpoint ne fait pas de génération de réponse LLM. Il retourne uniquement les chunks pertinents et leurs métadonnées.
 
-## 14. Flow complet de `GET /documents/{document_id}/chunks`
+## 14. Flow complet de `POST /answer`
+
+Flux actuel:
+
+```text
+Client
+-> POST /answer
+-> validation Pydantic avec AnswerRequest
+-> FastAPI route answer_question
+-> injection d'une session SQLAlchemy via get_db
+-> lecture de Settings via get_settings
+-> injection d'un client EmbeddingClient
+-> injection d'un client LLMClient
+-> appel du service answer_service.answer_question
+-> appel du service retrieval.retrieve_answer_context
+-> réutilisation de search_service.semantic_search
+-> génération de l'embedding de query par le client d'embeddings
+-> recherche pgvector des chunks les plus proches
+-> construction de sources contrôlées S1, S2, etc.
+-> construction d'un prompt avec question + contexte borné
+-> appel du LLM client
+-> validation de la sortie JSON is_answered / answer / citations
+-> validation que les citations demandées existent dans le contexte
+-> sérialisation avec AnswerResponse
+-> réponse HTTP 200
+```
+
+Le service de réponse ne duplique pas la logique de vector search. Toute récupération de chunks passe par `search_service.semantic_search`, via `services.retrieval`.
+
+Le contexte envoyé au LLM est borné par:
+
+- `ANSWER_CONTEXT_MAX_CHARS` pour le contexte total;
+- `ANSWER_SOURCE_MAX_CHARS` pour l'extrait de chaque chunk.
+
+Chaque source reçoit un identifiant local au contexte (`S1`, `S2`, etc.) et contient le titre du document, l'id du chunk, l'index du chunk, la section, le score de similarité et l'extrait. Les embeddings ne sont pas inclus dans le prompt et ne sont jamais renvoyés dans la réponse.
+
+L'abstention est forcée côté service dans les cas suivants:
+
+- aucun chunk embedded n'est récupéré;
+- le LLM retourne `is_answered = false`;
+- le LLM retourne une réponse vide;
+- le LLM retourne une réponse sans citation;
+- le LLM cite une source qui n'existe pas dans le contexte.
+
+Dans ces cas, l'API retourne `is_answered = false`, la réponse d'abstention standard et une liste de citations vide.
+
+## 15. Flow complet de `GET /documents/{document_id}/chunks`
 
 Flux actuel:
 
@@ -404,7 +462,7 @@ Client
 
 Cette route est volontairement simple. Elle aide à vérifier le résultat du chunking avant l'ajout d'un frontend complet. Elle n'expose pas la colonne `embedding`.
 
-## 15. Flow complet de `GET /documents`
+## 16. Flow complet de `GET /documents`
 
 Flux actuel:
 
@@ -423,7 +481,7 @@ Client
 
 Cette route expose les documents existants en base, sans pagination ni filtres pour l'instant.
 
-## 16. Limites actuelles
+## 17. Limites actuelles
 
 Limites connues:
 
@@ -431,16 +489,16 @@ Limites connues:
 - il n'y a pas encore d'isolation de données par utilisateur ou tenant;
 - il n'y a pas d'OCR pour les PDF scannés;
 - le chunking reste heuristique et ne parse pas encore les tableaux ou structures PDF complexes;
-- il n'y a pas encore de RAG ni de génération de réponse LLM;
+- le RAG actuel est synchrone, sans agentique, tool calling, LangGraph ou queue;
 - la dimension d'embedding est fixée à `1536` côté schéma PostgreSQL;
 - la recherche vectorielle n'a pas encore d'index HNSW ou IVFFlat;
 - l'endpoint d'embedding est synchrone et peut devenir lent sur de gros documents;
 - il n'y a pas encore de gestion d'erreurs avancée, pagination ou observabilité.
 
-## 17. Prochaines étapes
+## 18. Prochaines étapes
 
 Prochaines évolutions techniques recommandées:
 
-1. Ajouter des réponses avec citations à partir des chunks retrouvés.
-2. Ajouter des évaluations retrieval/RAG et une CI plus complète.
-3. Ajouter auth, rôles et isolation tenant.
+1. Ajouter des évaluations retrieval/RAG et une CI plus complète.
+2. Ajouter auth, rôles et isolation tenant.
+3. Ajouter un index vectoriel quand le volume de chunks le justifie.

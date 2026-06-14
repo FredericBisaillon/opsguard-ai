@@ -85,5 +85,5 @@ Inconvénients:
 - ajouter `min_similarity`;
 - stocker `embedding_model`, `embedding_dimensions` et `embedded_at` par chunk;
 - ajouter des évaluations retrieval;
-- construire une réponse finale avec citations à partir des chunks retrouvés;
+- maintenir la réponse finale avec citations décrite dans `ADR-005`;
 - ajouter auth, rôles et isolation tenant avant une recherche multi-utilisateur.

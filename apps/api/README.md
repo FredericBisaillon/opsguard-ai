@@ -11,4 +11,6 @@ Minimal FastAPI backend for OpsGuard AI.
 - `POST /documents/{document_id}/extract-text` extracts text from an uploaded PDF, Markdown, or plain text file, stores the extracted text locally, and updates the document status.
 - `POST /documents/{document_id}/chunk` chunks extracted text into ordered, structure-aware document chunks.
 - `POST /documents/{document_id}/embed` generates embeddings for persisted chunks and stores them in pgvector.
+- `POST /search` retrieves the most relevant embedded chunks with pgvector semantic search.
+- `POST /answer` builds a controlled RAG context from retrieved chunks and returns an answer with chunk citations or an abstention.
 - `GET /documents/{document_id}/chunks` lists persisted chunks for a document.

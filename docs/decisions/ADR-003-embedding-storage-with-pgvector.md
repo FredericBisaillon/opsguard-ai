@@ -4,6 +4,8 @@
 
 Accepté.
 
+Note de suivi: les blocs retrieval et réponse citée ont ensuite été ajoutés dans `ADR-004` et `ADR-005`. Le contexte ci-dessous décrit la décision au moment où seuls les embeddings étaient introduits.
+
 ## Contexte
 
 OpsGuard AI doit transformer les chunks documentaires en vecteurs afin de préparer la recherche sémantique et, plus tard, les réponses avec citations.

@@ -5,9 +5,12 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from opsguard_api.constants import (
+    DEFAULT_ANSWER_CONTEXT_MAX_CHARS,
+    DEFAULT_ANSWER_SOURCE_MAX_CHARS,
     DEFAULT_EMBEDDING_BATCH_SIZE,
     DEFAULT_EMBEDDING_DIMENSIONS,
     DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_LLM_MODEL,
     DEFAULT_SEARCH_TOP_K,
     MAX_SEARCH_QUERY_CHARS,
     MAX_SEARCH_TOP_K,
@@ -30,6 +33,15 @@ class Settings(BaseSettings):
     default_search_top_k: int = Field(default=DEFAULT_SEARCH_TOP_K, gt=0)
     max_search_top_k: int = Field(default=MAX_SEARCH_TOP_K, gt=0)
     max_search_query_chars: int = Field(default=MAX_SEARCH_QUERY_CHARS, gt=0)
+    llm_model: str = DEFAULT_LLM_MODEL
+    answer_context_max_chars: int = Field(
+        default=DEFAULT_ANSWER_CONTEXT_MAX_CHARS,
+        gt=0,
+    )
+    answer_source_max_chars: int = Field(
+        default=DEFAULT_ANSWER_SOURCE_MAX_CHARS,
+        gt=0,
+    )
 
     @property
     def max_upload_size_bytes(self) -> int:

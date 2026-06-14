@@ -2,7 +2,7 @@
 
 OpsGuard AI est une plateforme de revue documentaire IA sécurisée, construite progressivement comme projet portfolio backend/IA. Le but est de démontrer une architecture web maintenable, testable et orientée sécurité pour l'ingestion, la recherche et la revue de documents sensibles.
 
-Le projet ne fait pas encore de RAG ni de génération de réponses IA. Le bloc actuel stabilise une base saine: API FastAPI, upload local de documents, extraction de texte minimale, chunking structure-aware, génération d'embeddings de chunks, recherche sémantique pgvector, migrations Alembic, documentation et tests de base.
+Le projet possède maintenant un premier bloc RAG backend: ingestion documentaire locale, extraction de texte minimale, chunking structure-aware, génération d'embeddings de chunks, recherche sémantique pgvector, réponse LLM avec citations de chunks, abstention contrôlée, migrations Alembic, documentation et tests de base.
 
 ## État actuel
 
@@ -19,6 +19,7 @@ Ce qui existe aujourd'hui:
 - `POST /documents/{document_id}/chunk` pour découper le texte extrait en chunks;
 - `POST /documents/{document_id}/embed` pour générer et stocker les embeddings des chunks;
 - `POST /search` pour chercher les chunks les plus pertinents par similarité vectorielle;
+- `POST /answer` pour générer une réponse avec citations à partir des chunks retrouvés;
 - `GET /documents/{document_id}/chunks` pour inspecter les chunks d'un document;
 - `GET /documents` pour lister les documents;
 - une configuration locale de dossier d'upload, dossier d'extraction, taille maximale et limites de chunking;
@@ -26,15 +27,14 @@ Ce qui existe aujourd'hui:
 - l'image PostgreSQL `pgvector/pgvector:pg16`;
 - l'extension `vector` activée via Alembic;
 - Alembic pour versionner le schéma local;
-- le SDK OpenAI pour générer les embeddings;
+- le SDK OpenAI pour générer les embeddings et les réponses LLM;
 - un frontend Next.js minimal;
-- des tests pytest pour `/health`, les documents, l'upload, l'extraction, le chunking, les embeddings et la recherche sémantique.
+- des tests pytest pour `/health`, les documents, l'upload, l'extraction, le chunking, les embeddings, la recherche sémantique et les réponses RAG.
 
 Ce qui n'existe pas encore:
 
 - OCR pour les PDF scannés;
-- RAG ou réponses avec citations;
-- génération LLM/chat;
+- agentique, tool calling ou LangGraph;
 - authentification, rôles ou isolation tenant;
 - dashboard frontend complet;
 - CI complète.
@@ -142,13 +142,18 @@ EMBEDDING_BATCH_SIZE=64
 DEFAULT_SEARCH_TOP_K=5
 MAX_SEARCH_TOP_K=20
 MAX_SEARCH_QUERY_CHARS=1000
+
+LLM_MODEL=gpt-4o-mini
+ANSWER_CONTEXT_MAX_CHARS=6000
+ANSWER_SOURCE_MAX_CHARS=1200
 ```
 
 Ne commit jamais de vrais secrets dans `.env`. Le fichier `.env.example` sert uniquement de modèle local.
 Les fichiers téléversés sont sauvegardés localement dans `UPLOAD_DIR`. Les textes extraits sont sauvegardés dans `EXTRACTED_TEXT_DIR`. Les fichiers générés dans `data/uploads/` et `data/extracted/` sont ignorés par Git.
 `CHUNK_MAX_CHARS` et `CHUNK_OVERLAP_CHARS` contrôlent la taille des chunks créés depuis le texte extrait. L'overlap est surtout utilisé lorsque le backend doit couper un bloc trop long.
-`OPENAI_API_KEY` est requis pour générer les embeddings de chunks et les embeddings de query utilisés par `POST /search`. `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS` et `EMBEDDING_BATCH_SIZE` contrôlent la génération des embeddings de chunks. La dimension actuelle doit rester `1536`, car la colonne PostgreSQL est typée `vector(1536)`.
+`OPENAI_API_KEY` est requis pour générer les embeddings de chunks, les embeddings de query utilisés par `POST /search`, et les réponses LLM de `POST /answer`. `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS` et `EMBEDDING_BATCH_SIZE` contrôlent la génération des embeddings de chunks. La dimension actuelle doit rester `1536`, car la colonne PostgreSQL est typée `vector(1536)`.
 `DEFAULT_SEARCH_TOP_K`, `MAX_SEARCH_TOP_K` et `MAX_SEARCH_QUERY_CHARS` contrôlent les limites de la recherche sémantique.
+`LLM_MODEL` choisit le modèle chat utilisé par `POST /answer`. `ANSWER_CONTEXT_MAX_CHARS` limite le contexte total transmis au LLM, et `ANSWER_SOURCE_MAX_CHARS` limite l'extrait de chaque chunk cité.
 
 ## Lancer PostgreSQL
 
@@ -344,7 +349,7 @@ L'API ne renvoie jamais les vecteurs complets. En cas de succès, le statut pass
 
 ### `POST /search`
 
-Génère un embedding pour la question utilisateur avec le même client d'embeddings que les chunks, puis cherche les chunks les plus proches dans PostgreSQL avec pgvector. Cet endpoint fait uniquement du retrieval: il ne génère pas de réponse finale, n'appelle pas de modèle chat et ne produit pas encore de citations rédigées.
+Génère un embedding pour la question utilisateur avec le même client d'embeddings que les chunks, puis cherche les chunks les plus proches dans PostgreSQL avec pgvector. Cet endpoint fait uniquement du retrieval: il ne génère pas de réponse finale et ne produit pas de citations rédigées.
 
 Payload exemple:
 
@@ -380,6 +385,57 @@ Réponse exemple:
 ```
 
 La recherche utilise la distance cosine pgvector (`embedding <=> query_embedding`) et retourne `similarity_score = 1 - distance`. Plus le score est élevé, plus le chunk est proche de la query. Les embeddings complets ne sont jamais renvoyés par l'API.
+
+### `POST /answer`
+
+Réutilise la recherche sémantique existante pour récupérer les chunks pertinents, construit un contexte contrôlé, puis appelle un client LLM injectable pour produire une réponse JSON avec citations. L'endpoint ne fait pas d'agentique, de tool calling, de LangGraph ou de job en arrière-plan.
+
+Payload exemple:
+
+```json
+{
+  "query": "Quel est le délai pour signaler un incident ?",
+  "document_id": 2,
+  "top_k": 5
+}
+```
+
+Réponse exemple:
+
+```json
+{
+  "query": "Quel est le délai pour signaler un incident ?",
+  "answer": "Les incidents de sécurité doivent être signalés dans les 24 heures. [S1]",
+  "is_answered": true,
+  "citations": [
+    {
+      "source_id": "S1",
+      "document_id": 2,
+      "document_title": "Incident Response Policy",
+      "chunk_id": 12,
+      "chunk_index": 3,
+      "section_title": "Incident Reporting",
+      "excerpt": "Security incidents must be reported within 24 hours.",
+      "similarity_score": 0.84
+    }
+  ],
+  "retrieved_chunk_count": 1
+}
+```
+
+Si aucun chunk n'est récupéré, si le LLM indique que les sources sont insuffisantes, ou si le LLM ne retourne pas de citations valides parmi les sources fournies, l'API force l'abstention:
+
+```json
+{
+  "query": "Quel est le délai pour signaler un incident ?",
+  "answer": "Je ne sais pas d'apres les sources disponibles.",
+  "is_answered": false,
+  "citations": [],
+  "retrieved_chunk_count": 0
+}
+```
+
+Les citations sont basées sur les chunks du contexte (`S1`, `S2`, etc.) et incluent seulement des métadonnées utiles et un extrait borné. Les embeddings complets ne sont jamais renvoyés.
 
 ### `GET /documents/{document_id}/chunks`
 
@@ -427,6 +483,6 @@ Réponse exemple:
 
 Prochains blocs prévus:
 
-1. Construire une réponse avec citations à partir des chunks retrouvés.
-2. Ajouter des évaluations retrieval/RAG.
-3. Ajouter les premières tâches de revue et les contrôles de sécurité.
+1. Ajouter des évaluations retrieval/RAG.
+2. Ajouter les premières tâches de revue et les contrôles de sécurité.
+3. Ajouter l'authentification et l'isolation tenant avant tout usage multi-utilisateur.
