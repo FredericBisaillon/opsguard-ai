@@ -38,6 +38,11 @@ data/extracted/*
 data/uploads/*
 data/synthetic/*
 data/eval/*
+!data/eval/rag_eval_cases.jsonl
+
+# Local evaluation outputs
+reports/evals/*
+!reports/evals/.gitkeep
 
 # Keep data directories
 !data/raw/.gitkeep

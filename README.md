@@ -20,6 +20,7 @@ Ce qui existe aujourd'hui:
 - `POST /documents/{document_id}/embed` pour générer et stocker les embeddings des chunks;
 - `POST /search` pour chercher les chunks les plus pertinents par similarité vectorielle;
 - `POST /answer` pour générer une réponse avec citations à partir des chunks retrouvés;
+- un harness d'évaluation RAG minimal avec dataset JSONL, métriques simples et rapports locaux;
 - `GET /documents/{document_id}/chunks` pour inspecter les chunks d'un document;
 - `GET /documents` pour lister les documents;
 - une configuration locale de dossier d'upload, dossier d'extraction, taille maximale et limites de chunking;
@@ -176,7 +177,7 @@ La base utilise un volume Docker nommé `opsguard_postgres_data`.
 Dans `apps/api`:
 
 ```bash
-uv run uvicorn opsguard_api.main:app --reload
+uv run uvicorn --app-dir src opsguard_api.main:app --reload
 ```
 
 L'API est disponible par défaut sur:
@@ -219,6 +220,33 @@ Pour appliquer explicitement les migrations:
 ```bash
 uv run alembic upgrade head
 ```
+
+## Lancer les évaluations RAG
+
+Le dataset d'exemple vit dans `data/eval/rag_eval_cases.jsonl`. Remplace les
+`document_id` et `expected_chunk_ids` par les IDs réellement présents dans ta base
+locale avant de l'utiliser comme garde-fou de régression.
+
+Dans `apps/api`:
+
+```bash
+PYTHONPATH=src uv run python -m opsguard_api.evals.run_rag_evals --cases data/eval/rag_eval_cases.jsonl
+```
+
+Le runner utilise le pipeline réel de retrieval et de réponse. Il requiert donc
+`OPENAI_API_KEY` dans `.env` ou dans l'environnement shell, contrairement aux tests
+pytest qui restent déterministes et mockent/fakent les appels externes.
+
+Les rapports sont écrits dans:
+
+```text
+reports/evals/rag_eval_report.md
+reports/evals/rag_eval_results.json
+```
+
+La commande retourne un code non nul si au moins un cas échoue, ce qui permet de
+repérer rapidement une régression après un changement de chunking, embeddings,
+prompt ou modèle.
 
 ## Endpoints actuels
 

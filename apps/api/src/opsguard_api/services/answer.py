@@ -88,9 +88,27 @@ def answer_question(
             retrieved_chunk_count=context.retrieved_chunk_count,
         )
 
+    return answer_from_context(
+        query=context.query,
+        context=context,
+        llm_client=llm_client,
+    )
+
+
+def answer_from_context(
+    query: str,
+    context: retrieval.RetrievalContextData,
+    llm_client: LLMClient,
+) -> AnswerResponseData:
+    if not context.sources:
+        return _abstained_response(
+            query=query,
+            retrieved_chunk_count=context.retrieved_chunk_count,
+        )
+
     try:
         llm_answer = llm_client.generate_answer(
-            _build_messages(query=context.query, context_text=context.context_text)
+            _build_messages(query=query, context_text=context.context_text)
         )
     except LLMConfigurationError as exc:
         raise AnswerError(exc.message, status_code=500) from exc
@@ -102,7 +120,7 @@ def answer_question(
         raise AnswerError(exc.message, status_code=500) from exc
 
     return _response_from_llm_answer(
-        query=context.query,
+        query=query,
         context=context,
         llm_answer=llm_answer,
     )

@@ -13,4 +13,17 @@ Minimal FastAPI backend for OpsGuard AI.
 - `POST /documents/{document_id}/embed` generates embeddings for persisted chunks and stores them in pgvector.
 - `POST /search` retrieves the most relevant embedded chunks with pgvector semantic search.
 - `POST /answer` builds a controlled RAG context from retrieved chunks and returns an answer with chunk citations or an abstention.
+- `python -m opsguard_api.evals.run_rag_evals` runs the local RAG eval harness against a JSONL dataset and writes reports under `reports/evals`.
+
+## RAG eval harness
+
+From `apps/api`:
+
+```bash
+PYTHONPATH=src uv run python -m opsguard_api.evals.run_rag_evals --cases data/eval/rag_eval_cases.jsonl
+```
+
+The runner uses the real retrieval and answer services, so `OPENAI_API_KEY` must be
+configured when you launch it intentionally. Unit tests for eval scoring remain
+deterministic and do not call OpenAI.
 - `GET /documents/{document_id}/chunks` lists persisted chunks for a document.
