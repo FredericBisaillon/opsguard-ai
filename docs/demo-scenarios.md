@@ -1,6 +1,6 @@
 # Scénarios de démo actuels
 
-Ce document décrit les démonstrations possibles avec l'état actuel d'OpsGuard AI. Il couvre l'API de base, l'upload local minimal, l'extraction de texte, le chunking, les embeddings, la recherche sémantique et la réponse RAG avec citations. Il ne couvre pas encore l'authentification, l'agentique, le tool calling ou un frontend complet.
+Ce document décrit les démonstrations possibles avec l'état actuel d'OpsGuard AI. Il couvre l'API de base, l'upload local minimal, l'extraction de texte, le chunking, les embeddings, la recherche sémantique et la réponse RAG avec citations. Il ne couvre pas encore l'authentification utilisateur complète, l'agentique, le tool calling ou un frontend complet.
 
 ## Scénario 1: vérifier que l'API et la base locale fonctionnent
 

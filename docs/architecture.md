@@ -2,7 +2,7 @@
 
 Ce document décrit l'architecture actuelle d'OpsGuard AI. Il reflète l'état réel du projet à ce stade: API FastAPI, upload local minimal, extraction de texte locale, chunking structure-aware, embeddings de chunks, recherche sémantique pgvector, réponses RAG avec citations, tâches de revue manuelles ou suggérées par IA, audit events pour les actions sensibles, validation Pydantic, persistance PostgreSQL/pgvector, migrations Alembic et frontend Next.js minimal.
 
-OpsGuard AI ne fait pas encore d'OCR, d'agentique autonome, de LangGraph, de workflow d'approbation complet, d'authentification ou de multi-tenant.
+OpsGuard AI ne fait pas encore d'OCR, d'agentique autonome, de LangGraph, de workflow d'approbation complet, d'authentification utilisateur complète ou de multi-tenant.
 
 ## 1. Vue d'ensemble
 
@@ -35,6 +35,8 @@ Le backend expose actuellement une API HTTP simple:
 - `GET /audit-events/{event_id}`
 - `GET /documents/{document_id}/chunks`
 - `GET /documents`
+
+`GET /health` est public. Tous les autres endpoints sont protégés par une API key serveur minimale via le header `X-API-Key` lorsque `REQUIRE_API_KEY=true`.
 
 La base de données locale est PostgreSQL dans Docker. L'image utilisée inclut pgvector, les embeddings de chunks sont stockés dans `document_chunks.embedding`, et `POST /search` utilise cette colonne pour le retrieval vectoriel. `POST /answer` réutilise ce retrieval, construit un contexte borné, puis appelle un client LLM injectable pour produire une réponse citée ou une abstention. `POST /ai/review-tasks/suggest` réutilise le même retrieval, demande au LLM un tool call structuré, valide les arguments côté backend, puis crée optionnellement une tâche `ai_suggested`. Les tâches de revue sont stockées dans `review_tasks`. Les traces structurées sont stockées dans `audit_events`.
 
@@ -69,6 +71,23 @@ Technologies:
 - pytest, ruff et mypy pour la qualité.
 
 L'application FastAPI est définie dans `opsguard_api.main`. Au démarrage local, son lifespan appelle `init_database()`, qui applique les migrations Alembic jusqu'à `head`.
+
+## 3.1. Authentification API key
+
+L'authentification actuelle est volontairement minimale. Le backend lit:
+
+- `REQUIRE_API_KEY`, `true` par défaut;
+- `OPS_GUARD_API_KEY`, la clé serveur attendue.
+
+La dependency `opsguard_api.security.require_api_key` est appliquée au niveau des routers applicatifs dans `opsguard_api.main`. Elle lit le header `X-API-Key`, vérifie que la clé serveur est configurée en mode strict, puis compare les valeurs avec `secrets.compare_digest`.
+
+En cas de clé absente, invalide ou non configurée, l'API retourne HTTP `401` avec:
+
+```json
+{"detail": "Invalid or missing API key"}
+```
+
+Cette couche protège les workflows sensibles sans introduire encore d'utilisateurs, de JWT, de rôles, de sessions ou de tenants. Elle ne fournit pas d'identité utilisateur: les `audit_events.actor_id` restent donc généralement `NULL`.
 
 ## 4. Validation avec Pydantic
 
@@ -191,7 +210,7 @@ Chaque `SemanticSearchResult` expose les métadonnées utiles du chunk retrouvé
 
 - `event_type`: type d'événement métier ou IA;
 - `actor_type`: `system`, `human` ou `ai`;
-- `actor_id`: optionnel tant qu'il n'y a pas d'authentification;
+- `actor_id`: optionnel tant qu'il n'y a pas d'identité utilisateur;
 - `document_id` et `review_task_id`: liens optionnels;
 - `source`: `manual`, `ai`, `api` ou `system`;
 - `status`: `success`, `rejected`, `failed` ou `info`;
@@ -205,6 +224,7 @@ Chaque `SemanticSearchResult` expose les métadonnées utiles du chunk retrouvé
 Les routes sont responsables de la couche HTTP:
 
 - recevoir la requête;
+- valider l'API key via `require_api_key` pour tous les endpoints sauf `GET /health`;
 - déclencher la validation Pydantic;
 - obtenir une session DB via `Depends(get_db)`;
 - appeler le service approprié;
@@ -271,7 +291,7 @@ Le modèle SQLAlchemy `AuditEvent` décrit les traces d'audit structurées:
 - `event_type`, `actor_type`, `source` et `status` contrôlés par contraintes `CHECK`;
 - `metadata` stocké en JSONB dans PostgreSQL.
 
-Le lien `SET NULL` est volontaire: une trace d'audit doit survivre à la suppression d'un document ou d'une tâche, tout en évitant une référence cassée. Tant qu'il n'y a pas d'authentification, `actor_id` reste nullable.
+Le lien `SET NULL` est volontaire: une trace d'audit doit survivre à la suppression d'un document ou d'une tâche, tout en évitant une référence cassée. Tant qu'il n'y a pas d'identité utilisateur, `actor_id` reste nullable.
 
 Les schemas Pydantic décrivent les contrats de l'API:
 
@@ -295,6 +315,7 @@ La connexion à la base est centralisée dans `opsguard_api.db`.
 Composants principaux:
 
 - `Settings`: lit `DATABASE_URL` depuis `.env`;
+- `Settings`: lit aussi `REQUIRE_API_KEY` et `OPS_GUARD_API_KEY` pour la protection HTTP minimale;
 - `engine`: créé par SQLAlchemy avec `create_engine(...)`;
 - `SessionLocal`: fabrique les sessions SQLAlchemy;
 - `get_db()`: dépendance FastAPI qui fournit une session par requête;

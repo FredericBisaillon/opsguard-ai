@@ -2,7 +2,7 @@
 
 OpsGuard AI est une plateforme de revue documentaire IA sécurisée, construite progressivement comme projet portfolio backend/IA. Le but est de démontrer une architecture web maintenable, testable et orientée sécurité pour l'ingestion, la recherche et la revue de documents sensibles.
 
-Le projet possède maintenant un premier bloc RAG backend: ingestion documentaire locale, extraction de texte minimale, chunking structure-aware, génération d'embeddings de chunks, recherche sémantique pgvector, réponse LLM avec citations de chunks, abstention contrôlée, tâches de revue métier manuelles, première suggestion de tâches via tool calling sécurisé, audit events pour les actions IA importantes, migrations Alembic, documentation et tests de base.
+Le projet possède maintenant un premier bloc RAG backend: ingestion documentaire locale, extraction de texte minimale, chunking structure-aware, génération d'embeddings de chunks, recherche sémantique pgvector, réponse LLM avec citations de chunks, abstention contrôlée, tâches de revue métier manuelles, première suggestion de tâches via tool calling sécurisé, audit events pour les actions IA importantes, authentification minimale par API key, migrations Alembic, documentation et tests de base.
 
 ## État actuel
 
@@ -25,6 +25,7 @@ Ce qui existe aujourd'hui:
 - `POST /review-tasks`, `GET /review-tasks`, `GET /review-tasks/{task_id}`, `PATCH /review-tasks/{task_id}` et `POST /review-tasks/{task_id}/dismiss` pour gérer des tâches de revue manuelles;
 - `POST /ai/review-tasks/suggest` pour demander au LLM une proposition structurée de tâche à partir du contexte RAG, avec création optionnelle après validation backend stricte;
 - `GET /audit-events` et `GET /audit-events/{event_id}` pour lire les traces d'audit structurées;
+- une authentification minimale par header `X-API-Key` sur tous les endpoints applicatifs sauf `GET /health`;
 - un harness d'évaluation RAG minimal avec dataset JSONL, métriques simples et rapports locaux;
 - `GET /documents/{document_id}/chunks` pour inspecter les chunks d'un document;
 - `GET /documents` pour lister les documents;
@@ -42,7 +43,7 @@ Ce qui n'existe pas encore:
 - OCR pour les PDF scannés;
 - agentique autonome, multi-outils ou LangGraph;
 - workflow d'approbation complet pour les tâches suggérées par IA;
-- authentification, rôles ou isolation tenant;
+- authentification complète avec utilisateurs, rôles ou isolation tenant;
 - dashboard frontend d'audit ou intégration SIEM;
 - dashboard frontend complet;
 - CI complète.
@@ -142,6 +143,9 @@ MAX_UPLOAD_SIZE_MB=10
 CHUNK_MAX_CHARS=1200
 CHUNK_OVERLAP_CHARS=150
 
+REQUIRE_API_KEY=true
+OPS_GUARD_API_KEY=replace-with-local-dev-api-key
+
 OPENAI_API_KEY=
 EMBEDDING_MODEL=text-embedding-3-small
 EMBEDDING_DIMENSIONS=1536
@@ -159,9 +163,20 @@ ANSWER_SOURCE_MAX_CHARS=1200
 Ne commit jamais de vrais secrets dans `.env`. Le fichier `.env.example` sert uniquement de modèle local.
 Les fichiers téléversés sont sauvegardés localement dans `UPLOAD_DIR`. Les textes extraits sont sauvegardés dans `EXTRACTED_TEXT_DIR`. Les fichiers générés dans `data/uploads/` et `data/extracted/` sont ignorés par Git.
 `CHUNK_MAX_CHARS` et `CHUNK_OVERLAP_CHARS` contrôlent la taille des chunks créés depuis le texte extrait. L'overlap est surtout utilisé lorsque le backend doit couper un bloc trop long.
+`REQUIRE_API_KEY` vaut `true` par défaut. Quand il est activé, tous les endpoints sauf `GET /health` exigent le header `X-API-Key` avec la valeur de `OPS_GUARD_API_KEY`. Si la clé est absente, invalide ou non configurée en mode strict, l'API retourne `401` avec `{"detail": "Invalid or missing API key"}`.
 `OPENAI_API_KEY` est requis pour générer les embeddings de chunks, les embeddings de query utilisés par `POST /search`, les réponses LLM de `POST /answer`, et les suggestions IA de `POST /ai/review-tasks/suggest`. `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS` et `EMBEDDING_BATCH_SIZE` contrôlent la génération des embeddings de chunks. La dimension actuelle doit rester `1536`, car la colonne PostgreSQL est typée `vector(1536)`.
 `DEFAULT_SEARCH_TOP_K`, `MAX_SEARCH_TOP_K` et `MAX_SEARCH_QUERY_CHARS` contrôlent les limites de la recherche sémantique.
 `LLM_MODEL` choisit le modèle chat utilisé par `POST /answer` et par `POST /ai/review-tasks/suggest`. `ANSWER_CONTEXT_MAX_CHARS` limite le contexte total transmis au LLM, et `ANSWER_SOURCE_MAX_CHARS` limite l'extrait de chaque chunk cité. Le contexte RAG est borné par source avec des marqueurs `BEGIN/END SOURCE`; les textes de sources sont traités comme des données non fiables, jamais comme des instructions.
+
+## Authentification API key
+
+`GET /health` reste public pour les probes locales. Tous les autres endpoints exigent une clé API serveur simple:
+
+```bash
+curl -H "X-API-Key: $OPS_GUARD_API_KEY" http://127.0.0.1:8000/documents
+```
+
+Cette API key est un garde-fou minimal pour le backend portfolio. Elle ne remplace pas une authentification complète: il n'y a pas encore d'utilisateurs, de JWT, de rôles, de sessions, de tenants ou de workflow de rotation de clés.
 
 ## Lancer PostgreSQL
 
@@ -256,6 +271,8 @@ repérer rapidement une régression après un changement de chunking, embeddings
 prompt ou modèle.
 
 ## Endpoints actuels
+
+Sauf mention contraire, les endpoints ci-dessous exigent le header `X-API-Key` lorsque `REQUIRE_API_KEY=true`. `GET /health` est le seul endpoint public.
 
 ### `GET /health`
 
@@ -668,7 +685,7 @@ Les métadonnées d'audit sont volontairement courtes. Le backend supprime les c
 
 ### `GET /audit-events/{event_id}`
 
-Retourne un événement d'audit par identifiant. Il n'existe pas encore de pagination complète, de dashboard ou de contrôle d'accès dédié; sans authentification, `actor_id` reste généralement `null`.
+Retourne un événement d'audit par identifiant. Il n'existe pas encore de pagination complète, de dashboard ou de contrôle d'accès dédié; l'API key ne fournit pas d'identité utilisateur, donc `actor_id` reste généralement `null`.
 
 ### `GET /documents/{document_id}/chunks`
 
@@ -718,4 +735,4 @@ Prochains blocs prévus:
 
 1. Enrichir progressivement les évaluations retrieval/RAG.
 2. Ajouter une UX ou un workflow léger d'approbation autour des tâches `ai_suggested`.
-3. Ajouter l'authentification et l'isolation tenant avant tout usage multi-utilisateur.
+3. Remplacer l'API key minimale par une authentification utilisateur complète avec rôles et isolation tenant avant tout usage multi-utilisateur.

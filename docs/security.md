@@ -5,6 +5,7 @@ This document summarizes the current security posture of OpsGuard AI. It is not 
 ## Current Guardrails
 
 - Uploaded files are saved under a configured local upload directory using server-generated names.
+- All application endpoints except `GET /health` are protected by a minimal server-side API key when `REQUIRE_API_KEY=true`.
 - Text extraction only reads paths already associated with persisted documents.
 - Chunk embeddings are stored in PostgreSQL/pgvector but are not returned by API responses.
 - RAG context is bounded by `ANSWER_CONTEXT_MAX_CHARS` and `ANSWER_SOURCE_MAX_CHARS`.
@@ -13,6 +14,33 @@ This document summarizes the current security posture of OpsGuard AI. It is not 
 - Obvious secrets in retrieved source excerpts are redacted before they are sent to the LLM or returned as citation excerpts.
 - AI review tool calls are validated by backend Pydantic schemas before any database write.
 - Invalid AI tool calls are rejected and traced in `audit_events`.
+
+## API Key Authentication
+
+OpsGuard AI uses a minimal API key guard before full user authentication exists.
+
+Configuration:
+
+```env
+REQUIRE_API_KEY=true
+OPS_GUARD_API_KEY=replace-with-local-dev-api-key
+```
+
+Protected requests must send:
+
+```text
+X-API-Key: <configured key>
+```
+
+`GET /health` is public. Every other current HTTP endpoint is protected, including document ingestion and processing, semantic search, RAG answers, AI review task suggestions, review task reads/writes and audit event reads.
+
+If the key is missing, invalid, or not configured while strict mode is enabled, the API returns HTTP `401`:
+
+```json
+{"detail": "Invalid or missing API key"}
+```
+
+The backend stores the expected key as a secret setting, compares values with `secrets.compare_digest`, does not log the header, and does not include either the configured key or the provided key in error responses.
 
 ## Audit Events
 
@@ -48,9 +76,10 @@ The audit log should not store full prompts, full retrieved contexts, raw docume
 
 ## Current Limits
 
-- There is no authentication yet, so `actor_id` is usually `null`.
+- API key auth identifies access to the backend, not a real user; `actor_id` is still usually `null`.
 - There are no roles, tenant isolation or permission checks yet.
-- Audit events are readable through the local API without an auth layer.
+- There is no login, password management, JWT, session handling or OAuth.
+- There is no key rotation, per-client key registry or rate limiting yet.
 - Audit pagination is limited to a bounded `limit` parameter, not cursor pagination.
 - There is no SIEM integration, alerting pipeline or production retention policy.
 

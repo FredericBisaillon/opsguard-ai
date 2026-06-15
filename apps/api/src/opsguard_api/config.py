@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from opsguard_api.constants import (
@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     max_upload_size_mb: int = Field(default=10, gt=0)
     chunk_max_chars: int = Field(default=1200, gt=0)
     chunk_overlap_chars: int = Field(default=150, ge=0)
+    ops_guard_api_key: SecretStr | None = None
+    require_api_key: bool = True
     openai_api_key: str | None = None
     embedding_model: str = DEFAULT_EMBEDDING_MODEL
     embedding_dimensions: int = Field(default=DEFAULT_EMBEDDING_DIMENSIONS, gt=0)

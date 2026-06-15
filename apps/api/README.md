@@ -13,8 +13,36 @@ Minimal FastAPI backend for OpsGuard AI.
 - `POST /documents/{document_id}/embed` generates embeddings for persisted chunks and stores them in pgvector.
 - `POST /search` retrieves the most relevant embedded chunks with pgvector semantic search.
 - `POST /answer` builds a controlled, source-delimited RAG context from retrieved chunks and returns an answer with chunk citations or an abstention.
+- `POST /review-tasks`, `GET /review-tasks`, `GET /review-tasks/{task_id}`, `PATCH /review-tasks/{task_id}`, and `POST /review-tasks/{task_id}/dismiss` manage review tasks.
+- `POST /ai/review-tasks/suggest` asks the LLM for a validated review task suggestion.
+- `GET /audit-events` and `GET /audit-events/{event_id}` read structured audit events.
 - `GET /documents/{document_id}/chunks` lists persisted chunks for a document.
 - `python -m opsguard_api.evals.run_rag_evals` runs the local RAG eval harness against a JSONL dataset and writes reports under `reports/evals`.
+
+All API endpoints except `GET /health` are protected by the `X-API-Key` header when `REQUIRE_API_KEY=true`.
+
+## API key auth
+
+Local configuration is read from the repository-level `.env` file:
+
+```env
+REQUIRE_API_KEY=true
+OPS_GUARD_API_KEY=replace-with-local-dev-api-key
+```
+
+Call protected endpoints with:
+
+```bash
+curl -H "X-API-Key: $OPS_GUARD_API_KEY" http://127.0.0.1:8000/documents
+```
+
+Missing, invalid, or unconfigured keys in strict mode return:
+
+```json
+{"detail": "Invalid or missing API key"}
+```
+
+with HTTP `401`. This is intentionally minimal API key protection, not full user auth, JWT, RBAC, sessions, or multi-tenant isolation.
 
 ## RAG answer security
 
