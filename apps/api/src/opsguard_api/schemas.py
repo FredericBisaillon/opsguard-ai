@@ -155,6 +155,73 @@ class ReviewTaskRead(BaseModel):
     updated_at: datetime
 
 
+class ReviewTaskSuggestionRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=1000)
+    document_id: int = Field(gt=0)
+    top_k: int | None = Field(default=None, ge=1)
+    auto_create: bool = False
+
+    @field_validator("query")
+    @classmethod
+    def query_must_not_be_blank(cls, value: str) -> str:
+        query = value.strip()
+        if not query:
+            raise ValueError("Query cannot be empty.")
+        return query
+
+
+class ReviewTaskSuggestion(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    document_id: int = Field(gt=0)
+    chunk_id: int | None = Field(default=None, gt=0)
+    title: str = Field(min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=4000)
+    severity: ReviewTaskSeverity
+    evidence: str = Field(min_length=1, max_length=1200)
+    reason: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("title", "evidence", "reason")
+    @classmethod
+    def required_text_must_not_be_blank(cls, value: str) -> str:
+        cleaned_value = value.strip()
+        if not cleaned_value:
+            raise ValueError("Value cannot be empty.")
+        return cleaned_value
+
+    @field_validator("description")
+    @classmethod
+    def description_must_not_be_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+
+        description = value.strip()
+        if not description:
+            raise ValueError("Description cannot be empty.")
+        return description
+
+
+class ReviewTaskSuggestionCitation(BaseModel):
+    source_id: str
+    document_id: int
+    document_title: str
+    chunk_id: int
+    chunk_index: int
+    section_title: str | None
+    excerpt: str
+    similarity_score: float
+
+
+class ReviewTaskSuggestionResponse(BaseModel):
+    suggested: bool
+    created: bool
+    suggestion: ReviewTaskSuggestion | None
+    review_task: ReviewTaskRead | None
+    citations: list[ReviewTaskSuggestionCitation]
+    message: str
+    model: str
+
+
 class SemanticSearchRequest(BaseModel):
     query: str = Field(min_length=1)
     document_id: int | None = Field(default=None, gt=0)

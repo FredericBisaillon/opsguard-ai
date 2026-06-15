@@ -2,7 +2,7 @@
 
 OpsGuard AI est une plateforme de revue documentaire IA sécurisée, construite progressivement comme projet portfolio backend/IA. Le but est de démontrer une architecture web maintenable, testable et orientée sécurité pour l'ingestion, la recherche et la revue de documents sensibles.
 
-Le projet possède maintenant un premier bloc RAG backend: ingestion documentaire locale, extraction de texte minimale, chunking structure-aware, génération d'embeddings de chunks, recherche sémantique pgvector, réponse LLM avec citations de chunks, abstention contrôlée, tâches de revue métier manuelles, migrations Alembic, documentation et tests de base.
+Le projet possède maintenant un premier bloc RAG backend: ingestion documentaire locale, extraction de texte minimale, chunking structure-aware, génération d'embeddings de chunks, recherche sémantique pgvector, réponse LLM avec citations de chunks, abstention contrôlée, tâches de revue métier manuelles, première suggestion de tâches via tool calling sécurisé, migrations Alembic, documentation et tests de base.
 
 ## État actuel
 
@@ -22,6 +22,7 @@ Ce qui existe aujourd'hui:
 - `POST /search` pour chercher les chunks les plus pertinents par similarité vectorielle;
 - `POST /answer` pour générer une réponse avec citations à partir des chunks retrouvés, avec contexte délimité et durcissement prompt injection;
 - `POST /review-tasks`, `GET /review-tasks`, `GET /review-tasks/{task_id}`, `PATCH /review-tasks/{task_id}` et `POST /review-tasks/{task_id}/dismiss` pour gérer des tâches de revue manuelles;
+- `POST /ai/review-tasks/suggest` pour demander au LLM une proposition structurée de tâche à partir du contexte RAG, avec création optionnelle après validation backend stricte;
 - un harness d'évaluation RAG minimal avec dataset JSONL, métriques simples et rapports locaux;
 - `GET /documents/{document_id}/chunks` pour inspecter les chunks d'un document;
 - `GET /documents` pour lister les documents;
@@ -30,15 +31,15 @@ Ce qui existe aujourd'hui:
 - l'image PostgreSQL `pgvector/pgvector:pg16`;
 - l'extension `vector` activée via Alembic;
 - Alembic pour versionner le schéma local;
-- le SDK OpenAI pour générer les embeddings et les réponses LLM;
+- le SDK OpenAI pour générer les embeddings, les réponses LLM et les tool calls structurés;
 - un frontend Next.js minimal;
-- des tests pytest pour `/health`, les documents, l'upload, l'extraction, le chunking, les embeddings, la recherche sémantique, les réponses RAG et les tâches de revue.
+- des tests pytest pour `/health`, les documents, l'upload, l'extraction, le chunking, les embeddings, la recherche sémantique, les réponses RAG, les tâches de revue et le tool calling sécurisé.
 
 Ce qui n'existe pas encore:
 
 - OCR pour les PDF scannés;
-- agentique, tool calling ou LangGraph;
-- création automatique de tâches par LLM;
+- agentique autonome, multi-outils ou LangGraph;
+- workflow d'approbation complet pour les tâches suggérées par IA;
 - authentification, rôles ou isolation tenant;
 - dashboard frontend complet;
 - CI complète.
@@ -155,9 +156,9 @@ ANSWER_SOURCE_MAX_CHARS=1200
 Ne commit jamais de vrais secrets dans `.env`. Le fichier `.env.example` sert uniquement de modèle local.
 Les fichiers téléversés sont sauvegardés localement dans `UPLOAD_DIR`. Les textes extraits sont sauvegardés dans `EXTRACTED_TEXT_DIR`. Les fichiers générés dans `data/uploads/` et `data/extracted/` sont ignorés par Git.
 `CHUNK_MAX_CHARS` et `CHUNK_OVERLAP_CHARS` contrôlent la taille des chunks créés depuis le texte extrait. L'overlap est surtout utilisé lorsque le backend doit couper un bloc trop long.
-`OPENAI_API_KEY` est requis pour générer les embeddings de chunks, les embeddings de query utilisés par `POST /search`, et les réponses LLM de `POST /answer`. `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS` et `EMBEDDING_BATCH_SIZE` contrôlent la génération des embeddings de chunks. La dimension actuelle doit rester `1536`, car la colonne PostgreSQL est typée `vector(1536)`.
+`OPENAI_API_KEY` est requis pour générer les embeddings de chunks, les embeddings de query utilisés par `POST /search`, les réponses LLM de `POST /answer`, et les suggestions IA de `POST /ai/review-tasks/suggest`. `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS` et `EMBEDDING_BATCH_SIZE` contrôlent la génération des embeddings de chunks. La dimension actuelle doit rester `1536`, car la colonne PostgreSQL est typée `vector(1536)`.
 `DEFAULT_SEARCH_TOP_K`, `MAX_SEARCH_TOP_K` et `MAX_SEARCH_QUERY_CHARS` contrôlent les limites de la recherche sémantique.
-`LLM_MODEL` choisit le modèle chat utilisé par `POST /answer`. `ANSWER_CONTEXT_MAX_CHARS` limite le contexte total transmis au LLM, et `ANSWER_SOURCE_MAX_CHARS` limite l'extrait de chaque chunk cité. Le contexte RAG est borné par source avec des marqueurs `BEGIN/END SOURCE`; les textes de sources sont traités comme des données non fiables, jamais comme des instructions.
+`LLM_MODEL` choisit le modèle chat utilisé par `POST /answer` et par `POST /ai/review-tasks/suggest`. `ANSWER_CONTEXT_MAX_CHARS` limite le contexte total transmis au LLM, et `ANSWER_SOURCE_MAX_CHARS` limite l'extrait de chaque chunk cité. Le contexte RAG est borné par source avec des marqueurs `BEGIN/END SOURCE`; les textes de sources sont traités comme des données non fiables, jamais comme des instructions.
 
 ## Lancer PostgreSQL
 
@@ -477,6 +478,64 @@ Si aucun chunk n'est récupéré, si le LLM indique que les sources sont insuffi
 
 Les citations sont basées sur les chunks du contexte (`S1`, `S2`, etc.) et incluent seulement des métadonnées utiles et un extrait borné. Les embeddings complets ne sont jamais renvoyés.
 
+### `POST /ai/review-tasks/suggest`
+
+Réutilise le retrieval RAG existant, appelle le LLM avec un seul outil structuré `create_review_task`, puis valide strictement les arguments côté backend. Le LLM ne modifie jamais directement la base: il produit seulement une proposition. Par défaut, l'endpoint retourne cette suggestion sans créer de tâche. Si `auto_create = true`, le backend crée une `ReviewTask` avec `source = ai_suggested` après validation.
+
+Payload exemple:
+
+```json
+{
+  "query": "Analyse ce document et crée une tâche si une politique d'incident semble incomplète.",
+  "document_id": 2,
+  "top_k": 5,
+  "auto_create": false
+}
+```
+
+Réponse exemple sans création:
+
+```json
+{
+  "suggested": true,
+  "created": false,
+  "suggestion": {
+    "document_id": 2,
+    "chunk_id": 12,
+    "title": "Clarify incident escalation timeline",
+    "description": "The incident response policy does not define timing.",
+    "severity": "medium",
+    "evidence": "Escalation is required, but no timeline is stated.",
+    "reason": "Reviewers need a concrete escalation deadline."
+  },
+  "review_task": null,
+  "citations": [
+    {
+      "source_id": "S1",
+      "document_id": 2,
+      "document_title": "Incident Response Policy",
+      "chunk_id": 12,
+      "chunk_index": 3,
+      "section_title": "Incident Escalation",
+      "excerpt": "Escalation is required, but no timeline is stated.",
+      "similarity_score": 0.82
+    }
+  ],
+  "message": "Review task suggestion validated; no task was created.",
+  "model": "gpt-4o-mini"
+}
+```
+
+Garde-fous principaux:
+
+- les sources sont présentées au LLM comme du contenu non fiable;
+- le backend refuse un `document_id` différent de la requête;
+- le backend refuse un `chunk_id` absent des chunks récupérés;
+- le backend exige pour cette première version une preuve liée à un chunk;
+- `title`, `description`, `severity`, `evidence` et `reason` sont revalidés par Pydantic;
+- `source = ai_suggested` est imposé par le backend;
+- les embeddings ne sont jamais renvoyés.
+
 ### `POST /review-tasks`
 
 Crée une tâche de revue manuelle liée à un document, et optionnellement à un chunk précis. Cet endpoint ne fait aucun appel LLM et ne crée pas de tâche automatiquement.
@@ -594,5 +653,5 @@ Réponse exemple:
 Prochains blocs prévus:
 
 1. Enrichir progressivement les évaluations retrieval/RAG.
-2. Utiliser les `review_tasks` comme ressource métier pour un futur tool calling contrôlé.
+2. Ajouter une UX ou un workflow léger d'approbation autour des tâches `ai_suggested`.
 3. Ajouter l'authentification et l'isolation tenant avant tout usage multi-utilisateur.

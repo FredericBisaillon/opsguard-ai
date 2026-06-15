@@ -22,6 +22,29 @@ class ReviewTaskError(Exception):
 
 
 def create_review_task(db: Session, task_in: ReviewTaskCreate) -> ReviewTask:
+    return _create_review_task(
+        db=db,
+        task_in=task_in,
+        source=ReviewTaskSource.MANUAL,
+    )
+
+
+def create_ai_suggested_review_task(
+    db: Session,
+    task_in: ReviewTaskCreate,
+) -> ReviewTask:
+    return _create_review_task(
+        db=db,
+        task_in=task_in,
+        source=ReviewTaskSource.AI_SUGGESTED,
+    )
+
+
+def _create_review_task(
+    db: Session,
+    task_in: ReviewTaskCreate,
+    source: ReviewTaskSource,
+) -> ReviewTask:
     _get_document_or_raise(db, task_in.document_id)
     _validate_chunk_reference(
         db=db,
@@ -36,7 +59,7 @@ def create_review_task(db: Session, task_in: ReviewTaskCreate) -> ReviewTask:
         description=task_in.description,
         severity=task_in.severity.value,
         status=task_in.status.value,
-        source=ReviewTaskSource.MANUAL.value,
+        source=source.value,
     )
 
     db.add(task)
