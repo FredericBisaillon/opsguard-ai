@@ -1,0 +1,2 @@
+{"id": "incident-reporting-001", "query": "Quel est le delai pour signaler un incident ?", "document_id": 1, "expected_answer_contains": ["24 heures"], "expected_section_title": "Gestion des incidents", "expected_chunk_ids": [12], "should_abstain": false}
+{"id": "unknown-policy-001", "query": "Quelle est la politique de remboursement des frais de voyage ?", "document_id": 1, "expected_answer_contains": [], "expected_section_title": null, "expected_chunk_ids": [], "should_abstain": true}

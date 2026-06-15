@@ -5,7 +5,15 @@ description = "FastAPI backend for OpsGuard AI."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "alembic>=1.18.4",
     "fastapi",
+    "openai>=2.41.1",
+    "pgvector>=0.4.2",
+    "psycopg[binary]>=3.3.4",
+    "pydantic-settings>=2.14.1",
+    "pypdf",
+    "python-multipart",
+    "sqlalchemy>=2.0.50",
     "uvicorn",
 ]
 
