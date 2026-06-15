@@ -2,7 +2,7 @@
 
 OpsGuard AI est une plateforme de revue documentaire IA sécurisée, construite progressivement comme projet portfolio backend/IA. Le but est de démontrer une architecture web maintenable, testable et orientée sécurité pour l'ingestion, la recherche et la revue de documents sensibles.
 
-Le projet possède maintenant un premier bloc RAG backend: ingestion documentaire locale, extraction de texte minimale, chunking structure-aware, génération d'embeddings de chunks, recherche sémantique pgvector, réponse LLM avec citations de chunks, abstention contrôlée, tâches de revue métier manuelles, première suggestion de tâches via tool calling sécurisé, audit events pour les actions IA importantes, authentification minimale par API key, migrations Alembic, documentation et tests de base.
+Le projet possède maintenant un premier bloc RAG backend et une Review Console frontend minimale: ingestion documentaire locale, extraction de texte minimale, chunking structure-aware, génération d'embeddings de chunks, recherche sémantique pgvector, réponse LLM avec citations de chunks, abstention contrôlée, tâches de revue métier manuelles, première suggestion de tâches via tool calling sécurisé, audit events pour les actions IA importantes, authentification minimale par API key, migrations Alembic, documentation et tests de base.
 
 ## État actuel
 
@@ -35,7 +35,7 @@ Ce qui existe aujourd'hui:
 - l'extension `vector` activée via Alembic;
 - Alembic pour versionner le schéma local;
 - le SDK OpenAI pour générer les embeddings, les réponses LLM et les tool calls structurés;
-- un frontend Next.js minimal;
+- une Review Console Next.js minimale pour piloter le flow principal depuis le navigateur;
 - des tests pytest pour `/health`, les documents, l'upload, l'extraction, le chunking, les embeddings, la recherche sémantique, les réponses RAG, les tâches de revue et le tool calling sécurisé.
 
 Ce qui n'existe pas encore:
@@ -44,8 +44,8 @@ Ce qui n'existe pas encore:
 - agentique autonome, multi-outils ou LangGraph;
 - workflow d'approbation complet pour les tâches suggérées par IA;
 - authentification complète avec utilisateurs, rôles ou isolation tenant;
-- dashboard frontend d'audit ou intégration SIEM;
-- dashboard frontend complet;
+- viewer PDF complet, dashboard analytique avancé ou intégration SIEM;
+- authentification frontend complète;
 - CI complète.
 
 ## Stack actuelle
@@ -145,6 +145,7 @@ CHUNK_OVERLAP_CHARS=150
 
 REQUIRE_API_KEY=true
 OPS_GUARD_API_KEY=replace-with-local-dev-api-key
+CORS_ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
 
 OPENAI_API_KEY=
 EMBEDDING_MODEL=text-embedding-3-small
@@ -164,6 +165,7 @@ Ne commit jamais de vrais secrets dans `.env`. Le fichier `.env.example` sert un
 Les fichiers téléversés sont sauvegardés localement dans `UPLOAD_DIR`. Les textes extraits sont sauvegardés dans `EXTRACTED_TEXT_DIR`. Les fichiers générés dans `data/uploads/` et `data/extracted/` sont ignorés par Git.
 `CHUNK_MAX_CHARS` et `CHUNK_OVERLAP_CHARS` contrôlent la taille des chunks créés depuis le texte extrait. L'overlap est surtout utilisé lorsque le backend doit couper un bloc trop long.
 `REQUIRE_API_KEY` vaut `true` par défaut. Quand il est activé, tous les endpoints sauf `GET /health` exigent le header `X-API-Key` avec la valeur de `OPS_GUARD_API_KEY`. Si la clé est absente, invalide ou non configurée en mode strict, l'API retourne `401` avec `{"detail": "Invalid or missing API key"}`.
+`CORS_ALLOWED_ORIGINS` liste les origins navigateur autorisées à appeler l'API locale, notamment la Review Console Next.js sur `http://localhost:3000`.
 `OPENAI_API_KEY` est requis pour générer les embeddings de chunks, les embeddings de query utilisés par `POST /search`, les réponses LLM de `POST /answer`, et les suggestions IA de `POST /ai/review-tasks/suggest`. `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS` et `EMBEDDING_BATCH_SIZE` contrôlent la génération des embeddings de chunks. La dimension actuelle doit rester `1536`, car la colonne PostgreSQL est typée `vector(1536)`.
 `DEFAULT_SEARCH_TOP_K`, `MAX_SEARCH_TOP_K` et `MAX_SEARCH_QUERY_CHARS` contrôlent les limites de la recherche sémantique.
 `LLM_MODEL` choisit le modèle chat utilisé par `POST /answer` et par `POST /ai/review-tasks/suggest`. `ANSWER_CONTEXT_MAX_CHARS` limite le contexte total transmis au LLM, et `ANSWER_SOURCE_MAX_CHARS` limite l'extrait de chaque chunk cité. Le contexte RAG est borné par source avec des marqueurs `BEGIN/END SOURCE`; les textes de sources sont traités comme des données non fiables, jamais comme des instructions.
@@ -215,7 +217,14 @@ Au démarrage local, l'API applique les migrations Alembic jusqu'à `head`. La p
 Dans `apps/web`:
 
 ```bash
+cp .env.example .env.local
 pnpm dev
+```
+
+`apps/web/.env.local` peut définir:
+
+```env
+NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
 ```
 
 Le frontend est disponible par défaut sur:
@@ -224,7 +233,9 @@ Le frontend est disponible par défaut sur:
 http://localhost:3000
 ```
 
-Le frontend est minimal pour le moment et ne couvre pas encore un dashboard documentaire complet.
+La Review Console permet de configurer temporairement la clé API côté navigateur, lister et uploader des documents, lancer extraction/chunking/embeddings, poser une question RAG, demander une suggestion de review task, dismiss des tasks et lire les audit events récents.
+
+La clé saisie dans la console est stockée dans `localStorage` uniquement pour le développement et la démo. Elle ne remplace pas une authentification production.
 
 ## Lancer les tests et outils qualité
 

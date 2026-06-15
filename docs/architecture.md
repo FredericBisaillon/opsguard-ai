@@ -1,6 +1,6 @@
 # Architecture actuelle
 
-Ce document décrit l'architecture actuelle d'OpsGuard AI. Il reflète l'état réel du projet à ce stade: API FastAPI, upload local minimal, extraction de texte locale, chunking structure-aware, embeddings de chunks, recherche sémantique pgvector, réponses RAG avec citations, tâches de revue manuelles ou suggérées par IA, audit events pour les actions sensibles, validation Pydantic, persistance PostgreSQL/pgvector, migrations Alembic et frontend Next.js minimal.
+Ce document décrit l'architecture actuelle d'OpsGuard AI. Il reflète l'état réel du projet à ce stade: API FastAPI, upload local minimal, extraction de texte locale, chunking structure-aware, embeddings de chunks, recherche sémantique pgvector, réponses RAG avec citations, tâches de revue manuelles ou suggérées par IA, audit events pour les actions sensibles, validation Pydantic, persistance PostgreSQL/pgvector, migrations Alembic et Review Console Next.js minimale.
 
 OpsGuard AI ne fait pas encore d'OCR, d'agentique autonome, de LangGraph, de workflow d'approbation complet, d'authentification utilisateur complète ou de multi-tenant.
 
@@ -11,7 +11,7 @@ Le système est organisé en monorepo:
 ```text
 apps/
   api/   Backend FastAPI
-  web/   Frontend Next.js minimal
+  web/   Frontend Next.js Review Console
 docs/    Documentation projet
 ```
 
@@ -51,7 +51,24 @@ Technologies:
 - Tailwind
 - pnpm
 
-Son rôle actuel est minimal. Il sert de point de départ frontend pour le projet portfolio, mais il ne contient pas encore de dashboard documentaire, d'upload, d'écran d'authentification ou de workflow de revue.
+Son rôle actuel est une Review Console sobre pour démontrer le flow principal du produit. La page `apps/web/src/app/page.tsx` rend un composant client `ReviewConsole`, qui consomme un client HTTP centralisé dans `apps/web/src/lib/api.ts`.
+
+La console couvre:
+
+- health check public;
+- configuration temporaire de `X-API-Key` dans le navigateur;
+- liste et upload de documents;
+- actions documentaires `extract-text`, `chunk` et `embed`;
+- formulaire RAG `POST /answer`;
+- suggestion de review task via `POST /ai/review-tasks/suggest`;
+- liste et dismiss de review tasks;
+- lecture compacte des audit events récents.
+
+La variable frontend `NEXT_PUBLIC_API_BASE_URL` configure l'URL du backend. Elle est publique dans le bundle navigateur et ne doit contenir aucun secret.
+
+La clé API saisie dans la console est stockée dans `localStorage` uniquement pour la démo locale. Elle n'est pas affichée après sauvegarde et n'est pas envoyée dans les URLs. Ce mécanisme ne remplace pas une authentification production.
+
+Le frontend ne contient pas encore de login, JWT, rôles, tenants, viewer PDF complet, realtime ou workflow d'approbation avancé.
 
 ## 3. Backend actuel
 
@@ -88,6 +105,11 @@ En cas de clé absente, invalide ou non configurée, l'API retourne HTTP `401` a
 ```
 
 Cette couche protège les workflows sensibles sans introduire encore d'utilisateurs, de JWT, de rôles, de sessions ou de tenants. Elle ne fournit pas d'identité utilisateur: les `audit_events.actor_id` restent donc généralement `NULL`.
+
+Pour les appels depuis la Review Console locale, FastAPI active `CORSMiddleware`
+avec les origins configurées par `CORS_ALLOWED_ORIGINS`, par défaut
+`http://localhost:3000,http://127.0.0.1:3000`. Cette liste permet les requêtes
+navigateur avec le header `X-API-Key` sans ouvrir l'API à toutes les origins.
 
 ## 4. Validation avec Pydantic
 
@@ -316,6 +338,7 @@ Composants principaux:
 
 - `Settings`: lit `DATABASE_URL` depuis `.env`;
 - `Settings`: lit aussi `REQUIRE_API_KEY` et `OPS_GUARD_API_KEY` pour la protection HTTP minimale;
+- `Settings`: lit `CORS_ALLOWED_ORIGINS` pour autoriser la console frontend locale;
 - `engine`: créé par SQLAlchemy avec `create_engine(...)`;
 - `SessionLocal`: fabrique les sessions SQLAlchemy;
 - `get_db()`: dépendance FastAPI qui fournit une session par requête;

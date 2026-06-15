@@ -44,10 +44,19 @@ class Settings(BaseSettings):
         default=DEFAULT_ANSWER_SOURCE_MAX_CHARS,
         gt=0,
     )
+    cors_allowed_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
 
     @property
     def max_upload_size_bytes(self) -> int:
         return self.max_upload_size_mb * 1024 * 1024
+
+    @property
+    def cors_allowed_origin_list(self) -> list[str]:
+        return [
+            origin.strip()
+            for origin in self.cors_allowed_origins.split(",")
+            if origin.strip()
+        ]
 
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / ".env",

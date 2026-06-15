@@ -2,7 +2,9 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
+from opsguard_api.config import get_settings
 from opsguard_api.db import init_database
 from opsguard_api.routes.ai_review import router as ai_review_router
 from opsguard_api.routes.answer import router as answer_router
@@ -20,6 +22,14 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="OpsGuard AI API", lifespan=lifespan)
+settings = get_settings()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_allowed_origin_list,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 protected_dependencies = [Depends(require_api_key)]
 app.include_router(documents_router, dependencies=protected_dependencies)
 app.include_router(search_router, dependencies=protected_dependencies)

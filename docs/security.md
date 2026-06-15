@@ -14,6 +14,7 @@ This document summarizes the current security posture of OpsGuard AI. It is not 
 - Obvious secrets in retrieved source excerpts are redacted before they are sent to the LLM or returned as citation excerpts.
 - AI review tool calls are validated by backend Pydantic schemas before any database write.
 - Invalid AI tool calls are rejected and traced in `audit_events`.
+- Local browser calls are limited by configured CORS origins for the Next.js Review Console.
 
 ## API Key Authentication
 
@@ -41,6 +42,31 @@ If the key is missing, invalid, or not configured while strict mode is enabled, 
 ```
 
 The backend stores the expected key as a secret setting, compares values with `secrets.compare_digest`, does not log the header, and does not include either the configured key or the provided key in error responses.
+
+## Frontend API Key Handling
+
+The Next.js Review Console can store the API key in browser `localStorage` for
+local development and portfolio demos. After the key is saved, the UI only shows
+that a key is configured; it does not render the full value.
+
+This is not production authentication. A browser-stored shared API key is
+exposed to any script running on that origin and should be replaced later by
+real user authentication, sessions, roles, tenant boundaries and key rotation.
+
+The frontend must not log the key, put it in URLs, or include it in displayed
+error messages.
+
+## CORS
+
+The API uses `CORS_ALLOWED_ORIGINS` to allow the local Review Console to call
+protected endpoints with `X-API-Key`:
+
+```env
+CORS_ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+```
+
+Keep this list narrow. Do not use wildcard origins for authenticated browser
+flows.
 
 ## Audit Events
 
@@ -80,6 +106,7 @@ The audit log should not store full prompts, full retrieved contexts, raw docume
 - There are no roles, tenant isolation or permission checks yet.
 - There is no login, password management, JWT, session handling or OAuth.
 - There is no key rotation, per-client key registry or rate limiting yet.
+- The Review Console stores the shared demo API key in browser `localStorage`.
 - Audit pagination is limited to a bounded `limit` parameter, not cursor pagination.
 - There is no SIEM integration, alerting pipeline or production retention policy.
 
