@@ -4,12 +4,20 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from opsguard_api.config import Settings
-from opsguard_api.models import ReviewTask
+from opsguard_api.models import (
+    AuditActorType,
+    AuditEventSource,
+    AuditEventStatus,
+    AuditEventType,
+    ReviewTask,
+)
 from opsguard_api.schemas import (
+    AuditEventCreateInternal,
     ReviewTaskCreate,
     ReviewTaskSuggestion,
     ReviewTaskSuggestionRequest,
 )
+from opsguard_api.services import audit_events as audit_events_service
 from opsguard_api.services import retrieval
 from opsguard_api.services import review_tasks as review_tasks_service
 from opsguard_api.services import search as search_service
@@ -96,7 +104,23 @@ def suggest_review_task(
     except search_service.SemanticSearchError as exc:
         raise AIReviewError(exc.message, status_code=exc.status_code) from exc
 
+    _audit_prompt_injection_signals(
+        db=db,
+        context=context,
+        requested_document_id=suggestion_in.document_id,
+        model=llm_client.model,
+    )
+
     if not context.sources:
+        _audit_no_suggestion(
+            db=db,
+            document_id=suggestion_in.document_id,
+            model=llm_client.model,
+            top_k=suggestion_in.top_k,
+            auto_create=suggestion_in.auto_create,
+            reason="no_relevant_chunks",
+            context=context,
+        )
         return ReviewTaskSuggestionResponseData(
             suggested=False,
             created=False,
@@ -121,6 +145,15 @@ def suggest_review_task(
         raise AIReviewError(exc.message, status_code=500) from exc
 
     if tool_call is None:
+        _audit_no_suggestion(
+            db=db,
+            document_id=suggestion_in.document_id,
+            model=llm_client.model,
+            top_k=suggestion_in.top_k,
+            auto_create=suggestion_in.auto_create,
+            reason="no_supported_tool_call",
+            context=context,
+        )
         return ReviewTaskSuggestionResponseData(
             suggested=False,
             created=False,
@@ -133,13 +166,36 @@ def suggest_review_task(
             model=llm_client.model,
         )
 
-    suggestion, source = _validate_tool_call(
-        tool_name=tool_call.tool_name,
-        arguments=tool_call.arguments,
-        requested_document_id=suggestion_in.document_id,
+    try:
+        suggestion, source = _validate_tool_call(
+            tool_name=tool_call.tool_name,
+            arguments=tool_call.arguments,
+            requested_document_id=suggestion_in.document_id,
+            context=context,
+        )
+    except AIReviewError as exc:
+        _audit_rejected_tool_call(
+            db=db,
+            document_id=suggestion_in.document_id,
+            model=llm_client.model,
+            top_k=suggestion_in.top_k,
+            auto_create=suggestion_in.auto_create,
+            tool_name=tool_call.tool_name,
+            arguments=tool_call.arguments,
+            validation_error=exc.message,
+            context=context,
+        )
+        raise
+
+    citation = _citation_from_source(source)
+    _audit_valid_suggestion(
+        db=db,
+        suggestion=suggestion,
+        model=llm_client.model,
+        top_k=suggestion_in.top_k,
+        auto_create=suggestion_in.auto_create,
         context=context,
     )
-    citation = _citation_from_source(source)
 
     review_task: ReviewTask | None = None
     if suggestion_in.auto_create:
@@ -156,6 +212,15 @@ def suggest_review_task(
             )
         except review_tasks_service.ReviewTaskError as exc:
             raise AIReviewError(exc.message, status_code=exc.status_code) from exc
+
+        _audit_created_review_task(
+            db=db,
+            suggestion=suggestion,
+            review_task=review_task,
+            model=llm_client.model,
+            top_k=suggestion_in.top_k,
+            context=context,
+        )
 
     return ReviewTaskSuggestionResponseData(
         suggested=True,
@@ -257,3 +322,201 @@ def _citation_from_source(
         excerpt=source.excerpt,
         similarity_score=source.similarity_score,
     )
+
+
+def _audit_no_suggestion(
+    *,
+    db: Session,
+    document_id: int,
+    model: str,
+    top_k: int | None,
+    auto_create: bool,
+    reason: str,
+    context: retrieval.RetrievalContextData,
+) -> None:
+    audit_events_service.create_audit_event(
+        db=db,
+        event_in=AuditEventCreateInternal(
+            event_type=AuditEventType.AI_REVIEW_NO_SUGGESTION,
+            actor_type=AuditActorType.AI,
+            actor_id=None,
+            document_id=document_id,
+            review_task_id=None,
+            source=AuditEventSource.AI,
+            status=AuditEventStatus.INFO,
+            summary=f"AI review returned no suggestion for document {document_id}.",
+            metadata={
+                "model": model,
+                "top_k": top_k,
+                "auto_create": auto_create,
+                "reason": reason,
+                "retrieved_chunk_count": context.retrieved_chunk_count,
+                "chunk_ids": _chunk_ids(context),
+            },
+        ),
+    )
+
+
+def _audit_rejected_tool_call(
+    *,
+    db: Session,
+    document_id: int,
+    model: str,
+    top_k: int | None,
+    auto_create: bool,
+    tool_name: str,
+    arguments: dict[str, object],
+    validation_error: str,
+    context: retrieval.RetrievalContextData,
+) -> None:
+    audit_events_service.create_audit_event(
+        db=db,
+        event_in=AuditEventCreateInternal(
+            event_type=AuditEventType.AI_REVIEW_TASK_REJECTED,
+            actor_type=AuditActorType.AI,
+            actor_id=None,
+            document_id=document_id,
+            review_task_id=None,
+            source=AuditEventSource.AI,
+            status=AuditEventStatus.REJECTED,
+            summary=(
+                "AI review rejected an invalid tool call "
+                f"for document {document_id}."
+            ),
+            metadata={
+                "model": model,
+                "top_k": top_k,
+                "auto_create": auto_create,
+                "tool_name": tool_name,
+                "argument_keys": sorted(arguments.keys()),
+                "validation_error": validation_error,
+                "chunk_ids": _chunk_ids(context),
+            },
+        ),
+    )
+
+
+def _audit_valid_suggestion(
+    *,
+    db: Session,
+    suggestion: ReviewTaskSuggestion,
+    model: str,
+    top_k: int | None,
+    auto_create: bool,
+    context: retrieval.RetrievalContextData,
+) -> None:
+    audit_events_service.create_audit_event(
+        db=db,
+        event_in=AuditEventCreateInternal(
+            event_type=AuditEventType.AI_REVIEW_TASK_SUGGESTED,
+            actor_type=AuditActorType.AI,
+            actor_id=None,
+            document_id=suggestion.document_id,
+            review_task_id=None,
+            source=AuditEventSource.AI,
+            status=AuditEventStatus.SUCCESS,
+            summary=(
+                "AI suggested a review task "
+                f"for document {suggestion.document_id}."
+            ),
+            metadata={
+                "model": model,
+                "top_k": top_k,
+                "auto_create": auto_create,
+                "chunk_ids": _chunk_ids(context),
+                "suggestion": {
+                    "document_id": suggestion.document_id,
+                    "chunk_id": suggestion.chunk_id,
+                    "title": suggestion.title,
+                    "severity": suggestion.severity.value,
+                },
+            },
+        ),
+    )
+
+
+def _audit_created_review_task(
+    *,
+    db: Session,
+    suggestion: ReviewTaskSuggestion,
+    review_task: ReviewTask,
+    model: str,
+    top_k: int | None,
+    context: retrieval.RetrievalContextData,
+) -> None:
+    audit_events_service.create_audit_event(
+        db=db,
+        event_in=AuditEventCreateInternal(
+            event_type=AuditEventType.AI_REVIEW_TASK_CREATED,
+            actor_type=AuditActorType.AI,
+            actor_id=None,
+            document_id=suggestion.document_id,
+            review_task_id=review_task.id,
+            source=AuditEventSource.AI,
+            status=AuditEventStatus.SUCCESS,
+            summary=(
+                "AI-created review task "
+                f"{review_task.id} for document {suggestion.document_id}."
+            ),
+            metadata={
+                "model": model,
+                "top_k": top_k,
+                "chunk_ids": _chunk_ids(context),
+                "created_task_id": review_task.id,
+                "suggestion_chunk_id": suggestion.chunk_id,
+            },
+        ),
+    )
+
+
+def _audit_prompt_injection_signals(
+    *,
+    db: Session,
+    context: retrieval.RetrievalContextData,
+    requested_document_id: int,
+    model: str,
+) -> None:
+    signal_sources = [
+        source for source in context.sources if source.prompt_injection_signals
+    ]
+    if not signal_sources:
+        return
+
+    security_warnings = sorted(
+        {
+            signal
+            for source in signal_sources
+            for signal in source.prompt_injection_signals
+        }
+    )
+    audit_events_service.create_audit_event(
+        db=db,
+        event_in=AuditEventCreateInternal(
+            event_type=AuditEventType.RAG_PROMPT_INJECTION_DETECTED,
+            actor_type=AuditActorType.SYSTEM,
+            actor_id=None,
+            document_id=requested_document_id,
+            review_task_id=None,
+            source=AuditEventSource.SYSTEM,
+            status=AuditEventStatus.INFO,
+            summary=(
+                "Prompt injection signals detected during AI review "
+                f"for document {requested_document_id}."
+            ),
+            metadata={
+                "flow": "ai_review",
+                "model": model,
+                "security_warnings": security_warnings,
+                "source_ids": [source.source_id for source in signal_sources],
+                "chunk_ids": [source.chunk_id for source in signal_sources],
+                "signal_count": sum(
+                    len(source.prompt_injection_signals)
+                    for source in signal_sources
+                ),
+            },
+        ),
+    )
+
+
+def _chunk_ids(context: retrieval.RetrievalContextData) -> list[int]:
+    return [source.chunk_id for source in context.sources]

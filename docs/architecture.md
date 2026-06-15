@@ -1,6 +1,6 @@
 # Architecture actuelle
 
-Ce document décrit l'architecture actuelle d'OpsGuard AI. Il reflète l'état réel du projet à ce stade: API FastAPI, upload local minimal, extraction de texte locale, chunking structure-aware, embeddings de chunks, recherche sémantique pgvector, réponses RAG avec citations, tâches de revue manuelles ou suggérées par IA, validation Pydantic, persistance PostgreSQL/pgvector, migrations Alembic et frontend Next.js minimal.
+Ce document décrit l'architecture actuelle d'OpsGuard AI. Il reflète l'état réel du projet à ce stade: API FastAPI, upload local minimal, extraction de texte locale, chunking structure-aware, embeddings de chunks, recherche sémantique pgvector, réponses RAG avec citations, tâches de revue manuelles ou suggérées par IA, audit events pour les actions sensibles, validation Pydantic, persistance PostgreSQL/pgvector, migrations Alembic et frontend Next.js minimal.
 
 OpsGuard AI ne fait pas encore d'OCR, d'agentique autonome, de LangGraph, de workflow d'approbation complet, d'authentification ou de multi-tenant.
 
@@ -31,10 +31,12 @@ Le backend expose actuellement une API HTTP simple:
 - `GET /review-tasks/{task_id}`
 - `PATCH /review-tasks/{task_id}`
 - `POST /review-tasks/{task_id}/dismiss`
+- `GET /audit-events`
+- `GET /audit-events/{event_id}`
 - `GET /documents/{document_id}/chunks`
 - `GET /documents`
 
-La base de données locale est PostgreSQL dans Docker. L'image utilisée inclut pgvector, les embeddings de chunks sont stockés dans `document_chunks.embedding`, et `POST /search` utilise cette colonne pour le retrieval vectoriel. `POST /answer` réutilise ce retrieval, construit un contexte borné, puis appelle un client LLM injectable pour produire une réponse citée ou une abstention. `POST /ai/review-tasks/suggest` réutilise le même retrieval, demande au LLM un tool call structuré, valide les arguments côté backend, puis crée optionnellement une tâche `ai_suggested`. Les tâches de revue sont stockées dans `review_tasks`.
+La base de données locale est PostgreSQL dans Docker. L'image utilisée inclut pgvector, les embeddings de chunks sont stockés dans `document_chunks.embedding`, et `POST /search` utilise cette colonne pour le retrieval vectoriel. `POST /answer` réutilise ce retrieval, construit un contexte borné, puis appelle un client LLM injectable pour produire une réponse citée ou une abstention. `POST /ai/review-tasks/suggest` réutilise le même retrieval, demande au LLM un tool call structuré, valide les arguments côté backend, puis crée optionnellement une tâche `ai_suggested`. Les tâches de revue sont stockées dans `review_tasks`. Les traces structurées sont stockées dans `audit_events`.
 
 ## 2. Frontend actuel
 
@@ -185,6 +187,19 @@ Chaque `SemanticSearchResult` expose les métadonnées utiles du chunk retrouvé
 
 `AnswerResponse` retourne la query, le texte de réponse, `is_answered`, les citations retenues et `retrieved_chunk_count`. Chaque citation expose `source_id`, les métadonnées du chunk et un `excerpt` borné, jamais le vecteur d'embedding.
 
+`AuditEventCreateInternal` est un schema interne utilisé par les services pour écrire une trace structurée. Il n'est pas exposé comme endpoint public de création. Il contrôle:
+
+- `event_type`: type d'événement métier ou IA;
+- `actor_type`: `system`, `human` ou `ai`;
+- `actor_id`: optionnel tant qu'il n'y a pas d'authentification;
+- `document_id` et `review_task_id`: liens optionnels;
+- `source`: `manual`, `ai`, `api` ou `system`;
+- `status`: `success`, `rejected`, `failed` ou `info`;
+- `summary`: résumé court;
+- `metadata`: JSON court, nettoyé par le service d'audit avant persistance.
+
+`AuditEventRead` expose les événements via `GET /audit-events` et `GET /audit-events/{event_id}`. Le champ public s'appelle `metadata`, mais le modèle SQLAlchemy utilise l'attribut Python `event_metadata` parce que `metadata` est réservé par SQLAlchemy.
+
 ## 5. Routes vs services
 
 Les routes sont responsables de la couche HTTP:
@@ -207,6 +222,7 @@ Les services contiennent la logique applicative simple:
 - orchestrer les réponses RAG avec contexte contrôlé, abstention et citations;
 - orchestrer les suggestions IA de tâches via retrieval, tool calling structuré et validation backend;
 - gérer les tâches de revue, dont la validation document/chunk;
+- écrire et lire les audit events structurés;
 - gérer les opérations SQLAlchemy nécessaires.
 
 La lecture concrète des fichiers est isolée dans `opsguard_api.services.extraction`, afin de garder la logique `.md`, `.txt` et `.pdf` hors de la route HTTP.
@@ -215,6 +231,7 @@ La logique d'appel provider est isolée dans `opsguard_api.services.embeddings`.
 La logique de réponse est isolée dans `opsguard_api.services.answer`. Elle appelle `opsguard_api.services.retrieval`, qui réutilise `search_service.semantic_search` et transforme les chunks récupérés en sources `S1`, `S2`, etc. Le client LLM est isolé dans `opsguard_api.services.llm` et reste injectable pour les tests.
 La logique de suggestion IA est isolée dans `opsguard_api.services.ai_review`. Elle appelle le retrieval existant, construit le prompt tool calling, valide les arguments proposés par le LLM, puis délègue la création optionnelle au service de tâches de revue.
 La logique des tâches de revue est isolée dans `opsguard_api.services.review_tasks`. La route ne vérifie pas directement les relations document/chunk: elle valide le contrat HTTP, puis délègue au service. Le service expose une création manuelle et une création `ai_suggested`, toutes deux basées sur le même helper interne de validation document/chunk.
+La logique d'audit est isolée dans `opsguard_api.services.audit_events`. Les routes d'audit ne lisent que les événements; les écritures sont déclenchées par les services métier ou IA. Le service nettoie défensivement les métadonnées avant stockage afin de ne pas conserver de secrets, embeddings, prompts complets ou contexte documentaire volumineux.
 
 Cette séparation garde les routes minces et rend la logique métier plus facile à tester et à faire évoluer.
 
@@ -246,6 +263,16 @@ Le modèle SQLAlchemy `ReviewTask` décrit les tâches de revue métier:
 
 Si un document est supprimé, ses tâches sont supprimées avec lui. Si un chunk est supprimé ou recréé, le lien `chunk_id` de la tâche est mis à `NULL`, ce qui garde la tâche au niveau document.
 
+Le modèle SQLAlchemy `AuditEvent` décrit les traces d'audit structurées:
+
+- nom de table: `audit_events`;
+- colonnes: `id`, `event_type`, `actor_type`, `actor_id`, `document_id`, `review_task_id`, `source`, `status`, `summary`, `metadata`, `created_at`;
+- liens optionnels vers `documents` et `review_tasks` avec `ON DELETE SET NULL`;
+- `event_type`, `actor_type`, `source` et `status` contrôlés par contraintes `CHECK`;
+- `metadata` stocké en JSONB dans PostgreSQL.
+
+Le lien `SET NULL` est volontaire: une trace d'audit doit survivre à la suppression d'un document ou d'une tâche, tout en évitant une référence cassée. Tant qu'il n'y a pas d'authentification, `actor_id` reste nullable.
+
 Les schemas Pydantic décrivent les contrats de l'API:
 
 - `DocumentCreate` pour l'entrée utilisateur;
@@ -255,6 +282,7 @@ Les schemas Pydantic décrivent les contrats de l'API:
 - `DocumentEmbeddingRead` pour l'embedding des chunks;
 - `ReviewTaskCreate`, `ReviewTaskUpdate` et `ReviewTaskRead` pour les tâches de revue;
 - `ReviewTaskSuggestionRequest`, `ReviewTaskSuggestion`, `ReviewTaskSuggestionCitation` et `ReviewTaskSuggestionResponse` pour le tool calling sécurisé de suggestion de tâches;
+- `AuditEventCreateInternal` et `AuditEventRead` pour l'écriture interne et la lecture des traces d'audit;
 - `SemanticSearchRequest`, `SemanticSearchResult` et `SemanticSearchResponse` pour la recherche sémantique;
 - `AnswerRequest`, `AnswerCitation` et `AnswerResponse` pour les réponses RAG citées.
 
@@ -290,7 +318,7 @@ La migration initiale exécute:
 CREATE EXTENSION IF NOT EXISTS vector
 ```
 
-Elle crée aussi la colonne `document_chunks.embedding vector(1536)`. La migration suivante crée `review_tasks`, ses index `document_id` et `chunk_id`, ses foreign keys et ses contraintes `CHECK` sur `severity`, `status` et `source`. Les migrations peuvent être lancées explicitement avec `uv run alembic upgrade head` depuis `apps/api`.
+Elle crée aussi la colonne `document_chunks.embedding vector(1536)`. La migration suivante crée `review_tasks`, ses index `document_id` et `chunk_id`, ses foreign keys et ses contraintes `CHECK` sur `severity`, `status` et `source`. La migration `0003_audit_events` crée la table `audit_events`, ses index de filtrage, ses liens optionnels `SET NULL`, ses contraintes de valeurs contrôlées et son champ `metadata JSONB`. Les migrations peuvent être lancées explicitement avec `uv run alembic upgrade head` depuis `apps/api`.
 
 ## 8. Flow complet de `POST /documents`
 
@@ -484,6 +512,7 @@ Client
 -> construction de sources contrôlées S1, S2, etc.
 -> redaction des secrets évidents dans les extraits de sources
 -> détection heuristique de signaux de prompt injection dans les chunks
+-> écriture d'un audit event si des signaux de prompt injection sont détectés
 -> construction d'un prompt avec question + contexte borné et délimité
 -> appel du LLM client
 -> validation de la sortie JSON is_answered / answer / citations
@@ -536,6 +565,8 @@ Client
 -> vérification que DocumentChunk.document_id correspond au document_id fourni
 -> création d'un ReviewTask avec source = manual
 -> db.add(task)
+-> db.flush() pour obtenir task.id
+-> écriture d'un audit event review_task_created
 -> db.commit()
 -> db.refresh(task)
 -> sérialisation avec ReviewTaskRead
@@ -550,7 +581,7 @@ Le service retourne:
 
 Les valeurs invalides de `severity` ou `status` sont rejetées par Pydantic avant l'appel du service. La table applique aussi des contraintes `CHECK` pour éviter qu'une écriture hors API stocke des valeurs inattendues.
 
-La liste `GET /review-tasks` accepte les filtres optionnels `document_id`, `status` et `severity`. `PATCH /review-tasks/{task_id}` modifie seulement `title`, `description`, `severity` et `status`. `POST /review-tasks/{task_id}/dismiss` met `status = dismissed` sans suppression physique.
+La liste `GET /review-tasks` accepte les filtres optionnels `document_id`, `status` et `severity`. `PATCH /review-tasks/{task_id}` modifie seulement `title`, `description`, `severity` et `status`. `POST /review-tasks/{task_id}/dismiss` met `status = dismissed` sans suppression physique et écrit un audit event `review_task_dismissed`.
 
 ## 16. Flow complet de `POST /ai/review-tasks/suggest`
 
@@ -566,12 +597,18 @@ Client
 -> retrieval.retrieve_answer_context
 -> search_service.semantic_search
 -> construction des sources S1, S2, etc.
+-> écriture d'un audit event si des signaux de prompt injection sont détectés
+-> si aucun chunk n'est récupéré, audit event ai_review_no_suggestion
 -> appel LLM avec l'outil create_review_task
 -> parsing du tool call
+-> si aucun tool call n'est retourné, audit event ai_review_no_suggestion
 -> validation backend des arguments LLM
+-> si le tool call est invalide, audit event ai_review_task_rejected
+-> si le tool call est valide, audit event ai_review_task_suggested
 -> si auto_create = false, retour de la suggestion validée
 -> si auto_create = true, appel de review_tasks_service.create_ai_suggested_review_task
 -> création d'un ReviewTask avec source = ai_suggested
+-> écriture d'un audit event ai_review_task_created
 -> sérialisation avec ReviewTaskSuggestionResponse
 -> réponse HTTP 200
 ```
@@ -590,7 +627,42 @@ Si aucun chunk n'est récupéré, le LLM n'est pas appelé. Si le LLM ne fait au
 
 Le prompt rappelle que les sources sont du contenu non fiable. Les instructions contenues dans les documents, comme ignorer les règles précédentes, révéler les prompts ou exfiltrer des secrets, doivent être ignorées. Les sources servent uniquement de preuve.
 
-## 17. Flow complet de `GET /documents/{document_id}/chunks`
+Les audit events d'AI review stockent des métadonnées courtes comme le modèle, `top_k`, `auto_create`, les `chunk_ids`, l'erreur de validation ou l'id de la tâche créée. Ils ne stockent pas les prompts complets, les embeddings, les clés API ou le contenu complet des chunks.
+
+## 17. Flow complet de `GET /audit-events`
+
+Flux actuel:
+
+```text
+Client
+-> GET /audit-events
+-> FastAPI route list_audit_events
+-> validation des filtres event_type, document_id, review_task_id, status, source, limit
+-> injection d'une session SQLAlchemy via get_db
+-> appel du service audit_events_service.list_audit_events
+-> requête SQLAlchemy select(AuditEvent)
+-> application des filtres optionnels
+-> tri par created_at desc, puis id desc
+-> LIMIT borné entre 1 et 500
+-> sérialisation avec list[AuditEventRead]
+-> réponse HTTP 200
+```
+
+`GET /audit-events/{event_id}` retourne un événement précis ou `404` s'il n'existe pas. Il n'y a volontairement pas de `POST /audit-events`: les écritures d'audit viennent des services internes.
+
+Les événements actuellement tracés sont:
+
+- `review_task_created`;
+- `review_task_dismissed`;
+- `ai_review_task_suggested`;
+- `ai_review_task_created`;
+- `ai_review_task_rejected`;
+- `ai_review_no_suggestion`;
+- `rag_prompt_injection_detected`.
+
+Le service d'audit nettoie les métadonnées avant persistance: il supprime les clés sensibles comme `embedding`, `api_key`, `token`, `secret`, `password`, `credential`, `prompt` ou `context_text`, tronque les chaînes longues et borne la taille JSON finale. Cette couche est défensive; les call sites doivent quand même passer des métadonnées allowlistées et courtes.
+
+## 18. Flow complet de `GET /documents/{document_id}/chunks`
 
 Flux actuel:
 
@@ -608,7 +680,7 @@ Client
 
 Cette route est volontairement simple. Elle aide à vérifier le résultat du chunking avant l'ajout d'un frontend complet. Elle n'expose pas la colonne `embedding`.
 
-## 18. Flow complet de `GET /documents`
+## 19. Flow complet de `GET /documents`
 
 Flux actuel:
 
@@ -627,7 +699,7 @@ Client
 
 Cette route expose les documents existants en base, sans pagination ni filtres pour l'instant.
 
-## 19. Limites actuelles
+## 20. Limites actuelles
 
 Limites connues:
 
@@ -640,9 +712,9 @@ Limites connues:
 - la dimension d'embedding est fixée à `1536` côté schéma PostgreSQL;
 - la recherche vectorielle n'a pas encore d'index HNSW ou IVFFlat;
 - l'endpoint d'embedding est synchrone et peut devenir lent sur de gros documents;
-- il n'y a pas encore de workflow d'approbation, assignation, audit log complet, pagination ou observabilité avancée.
+- il n'y a pas encore de workflow d'approbation, assignation, pagination complète des audit events ou observabilité avancée.
 
-## 20. Prochaines étapes
+## 21. Prochaines étapes
 
 Prochaines évolutions techniques recommandées:
 

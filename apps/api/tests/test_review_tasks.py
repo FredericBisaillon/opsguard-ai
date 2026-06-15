@@ -8,7 +8,13 @@ from sqlalchemy import delete, select
 
 from opsguard_api.db import SessionLocal, init_database
 from opsguard_api.main import app
-from opsguard_api.models import Document, DocumentChunk, DocumentStatus
+from opsguard_api.models import (
+    AuditEvent,
+    AuditEventType,
+    Document,
+    DocumentChunk,
+    DocumentStatus,
+)
 
 TEST_REVIEW_TASK_TITLE_PREFIX = "Test Review Task Document "
 
@@ -21,6 +27,7 @@ class ReviewTaskDocumentData:
 
 def delete_review_task_documents() -> None:
     with SessionLocal() as db:
+        db.execute(delete(AuditEvent))
         document_ids = list(
             db.scalars(
                 select(Document.id).where(
@@ -31,6 +38,17 @@ def delete_review_task_documents() -> None:
         if document_ids:
             db.execute(delete(Document).where(Document.id.in_(document_ids)))
         db.commit()
+
+
+def list_audit_events_for_task(task_id: int) -> list[AuditEvent]:
+    with SessionLocal() as db:
+        return list(
+            db.scalars(
+                select(AuditEvent)
+                .where(AuditEvent.review_task_id == task_id)
+                .order_by(AuditEvent.id)
+            ).all()
+        )
 
 
 def create_review_task_document(
@@ -106,6 +124,12 @@ def test_create_review_task_for_document() -> None:
     assert payload["source"] == "manual"
     assert payload["created_at"]
     assert payload["updated_at"]
+
+    audit_events = list_audit_events_for_task(payload["id"])
+    assert len(audit_events) == 1
+    assert audit_events[0].event_type == AuditEventType.REVIEW_TASK_CREATED.value
+    assert audit_events[0].document_id == document.document_id
+    assert audit_events[0].status == "success"
 
 
 def test_create_review_task_for_chunk() -> None:
@@ -374,6 +398,11 @@ def test_dismiss_review_task() -> None:
     assert dismiss_response.status_code == 200
     assert dismiss_response.json()["id"] == task_id
     assert dismiss_response.json()["status"] == "dismissed"
+
+    audit_events = list_audit_events_for_task(task_id)
+    event_types = [event.event_type for event in audit_events]
+    assert AuditEventType.REVIEW_TASK_CREATED.value in event_types
+    assert AuditEventType.REVIEW_TASK_DISMISSED.value in event_types
 
 
 def test_review_task_source_defaults_to_manual() -> None:

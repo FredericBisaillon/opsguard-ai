@@ -2,7 +2,7 @@
 
 OpsGuard AI est une plateforme de revue documentaire IA sécurisée, construite progressivement comme projet portfolio backend/IA. Le but est de démontrer une architecture web maintenable, testable et orientée sécurité pour l'ingestion, la recherche et la revue de documents sensibles.
 
-Le projet possède maintenant un premier bloc RAG backend: ingestion documentaire locale, extraction de texte minimale, chunking structure-aware, génération d'embeddings de chunks, recherche sémantique pgvector, réponse LLM avec citations de chunks, abstention contrôlée, tâches de revue métier manuelles, première suggestion de tâches via tool calling sécurisé, migrations Alembic, documentation et tests de base.
+Le projet possède maintenant un premier bloc RAG backend: ingestion documentaire locale, extraction de texte minimale, chunking structure-aware, génération d'embeddings de chunks, recherche sémantique pgvector, réponse LLM avec citations de chunks, abstention contrôlée, tâches de revue métier manuelles, première suggestion de tâches via tool calling sécurisé, audit events pour les actions IA importantes, migrations Alembic, documentation et tests de base.
 
 ## État actuel
 
@@ -13,6 +13,7 @@ Ce qui existe aujourd'hui:
 - un modèle `Document` SQLAlchemy;
 - un modèle `DocumentChunk` SQLAlchemy;
 - un modèle `ReviewTask` SQLAlchemy pour représenter des points de revue liés à un document ou à un chunk;
+- un modèle `AuditEvent` SQLAlchemy pour tracer les actions IA et les changements métier sensibles;
 - des schemas Pydantic pour créer et lire des documents;
 - `POST /documents` pour créer une entrée documentaire;
 - `POST /documents/upload` pour téléverser un PDF, Markdown ou texte brut localement;
@@ -23,6 +24,7 @@ Ce qui existe aujourd'hui:
 - `POST /answer` pour générer une réponse avec citations à partir des chunks retrouvés, avec contexte délimité et durcissement prompt injection;
 - `POST /review-tasks`, `GET /review-tasks`, `GET /review-tasks/{task_id}`, `PATCH /review-tasks/{task_id}` et `POST /review-tasks/{task_id}/dismiss` pour gérer des tâches de revue manuelles;
 - `POST /ai/review-tasks/suggest` pour demander au LLM une proposition structurée de tâche à partir du contexte RAG, avec création optionnelle après validation backend stricte;
+- `GET /audit-events` et `GET /audit-events/{event_id}` pour lire les traces d'audit structurées;
 - un harness d'évaluation RAG minimal avec dataset JSONL, métriques simples et rapports locaux;
 - `GET /documents/{document_id}/chunks` pour inspecter les chunks d'un document;
 - `GET /documents` pour lister les documents;
@@ -41,6 +43,7 @@ Ce qui n'existe pas encore:
 - agentique autonome, multi-outils ou LangGraph;
 - workflow d'approbation complet pour les tâches suggérées par IA;
 - authentification, rôles ou isolation tenant;
+- dashboard frontend d'audit ou intégration SIEM;
 - dashboard frontend complet;
 - CI complète.
 
@@ -190,7 +193,7 @@ L'API est disponible par défaut sur:
 http://127.0.0.1:8000
 ```
 
-Au démarrage local, l'API applique les migrations Alembic jusqu'à `head`. La première migration active l'extension PostgreSQL `vector`, crée les tables documentaires et ajoute `document_chunks.embedding vector(1536)`. La migration suivante crée `review_tasks` avec ses liens document/chunk et ses contraintes de valeurs contrôlées.
+Au démarrage local, l'API applique les migrations Alembic jusqu'à `head`. La première migration active l'extension PostgreSQL `vector`, crée les tables documentaires et ajoute `document_chunks.embedding vector(1536)`. La migration suivante crée `review_tasks` avec ses liens document/chunk et ses contraintes de valeurs contrôlées. La migration `0003_audit_events` crée `audit_events` avec `metadata JSONB`, des liens optionnels vers document/tâche, des index de lecture et des contraintes sur les valeurs contrôlées.
 
 ## Lancer le frontend
 
@@ -605,6 +608,67 @@ Met à jour partiellement `title`, `description`, `severity` ou `status`. `descr
 ### `POST /review-tasks/{task_id}/dismiss`
 
 Marque une tâche comme `dismissed`. Il n'y a pas de suppression physique dans ce bloc afin de préserver l'historique métier minimal.
+
+### `GET /audit-events`
+
+Liste les événements d'audit, du plus récent au plus ancien. L'endpoint est en lecture seule: les écritures d'audit sont faites par les services internes, jamais par un `POST` public.
+
+Filtres optionnels:
+
+- `event_type`;
+- `document_id`;
+- `review_task_id`;
+- `status`;
+- `source`;
+- `limit`, entre 1 et 500, avec 100 par défaut.
+
+Événements actuellement tracés:
+
+- création manuelle d'une review task;
+- dismiss d'une review task;
+- suggestion IA validée;
+- création de review task via `auto_create = true`;
+- rejet d'un tool call invalide;
+- absence de suggestion IA;
+- détection de signaux de prompt injection dans les flows RAG ou AI review.
+
+Exemple:
+
+```text
+GET /audit-events?document_id=2&event_type=ai_review_task_created
+```
+
+Réponse exemple:
+
+```json
+[
+  {
+    "id": 10,
+    "event_type": "ai_review_task_created",
+    "actor_type": "ai",
+    "actor_id": null,
+    "document_id": 2,
+    "review_task_id": 7,
+    "source": "ai",
+    "status": "success",
+    "summary": "AI-created review task 7 for document 2.",
+    "metadata": {
+      "model": "gpt-4o-mini",
+      "top_k": 5,
+      "chunk_ids": [12],
+      "created_task_id": 7,
+      "suggestion_chunk_id": 12
+    },
+    "created_at": "2026-06-15T12:00:00Z"
+  }
+]
+```
+
+Les métadonnées d'audit sont volontairement courtes. Le backend supprime les clés sensibles comme `embedding`, `api_key`, `token`, `secret`, `password`, `credential`, `prompt` ou `context_text`, tronque les chaînes longues et ne stocke pas les prompts complets, les embeddings, les clés API ou le contenu complet des documents.
+
+### `GET /audit-events/{event_id}`
+
+Retourne un événement d'audit par identifiant. Il n'existe pas encore de pagination complète, de dashboard ou de contrôle d'accès dédié; sans authentification, `actor_id` reste généralement `null`.
 
 ### `GET /documents/{document_id}/chunks`
 

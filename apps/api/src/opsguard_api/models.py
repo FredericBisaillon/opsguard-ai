@@ -1,8 +1,10 @@
 from datetime import datetime
 from enum import StrEnum
+from typing import Any
 
 from pgvector.sqlalchemy import VECTOR  # type: ignore[import-untyped]
 from sqlalchemy import (
+    JSON,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -51,6 +53,36 @@ class ReviewTaskStatus(StrEnum):
 class ReviewTaskSource(StrEnum):
     MANUAL = "manual"
     AI_SUGGESTED = "ai_suggested"
+
+
+class AuditEventType(StrEnum):
+    REVIEW_TASK_CREATED = "review_task_created"
+    REVIEW_TASK_DISMISSED = "review_task_dismissed"
+    AI_REVIEW_TASK_SUGGESTED = "ai_review_task_suggested"
+    AI_REVIEW_TASK_CREATED = "ai_review_task_created"
+    AI_REVIEW_TASK_REJECTED = "ai_review_task_rejected"
+    AI_REVIEW_NO_SUGGESTION = "ai_review_no_suggestion"
+    RAG_PROMPT_INJECTION_DETECTED = "rag_prompt_injection_detected"
+
+
+class AuditActorType(StrEnum):
+    SYSTEM = "system"
+    HUMAN = "human"
+    AI = "ai"
+
+
+class AuditEventSource(StrEnum):
+    MANUAL = "manual"
+    AI = "ai"
+    API = "api"
+    SYSTEM = "system"
+
+
+class AuditEventStatus(StrEnum):
+    SUCCESS = "success"
+    REJECTED = "rejected"
+    FAILED = "failed"
+    INFO = "info"
 
 
 class Document(Base):
@@ -189,3 +221,62 @@ class ReviewTask(Base):
     )
     document: Mapped[Document] = relationship(back_populates="review_tasks")
     chunk: Mapped[DocumentChunk | None] = relationship(back_populates="review_tasks")
+
+
+class AuditEvent(Base):
+    __tablename__ = "audit_events"
+    __table_args__ = (
+        CheckConstraint(
+            "event_type IN ("
+            "'review_task_created', "
+            "'review_task_dismissed', "
+            "'ai_review_task_suggested', "
+            "'ai_review_task_created', "
+            "'ai_review_task_rejected', "
+            "'ai_review_no_suggestion', "
+            "'rag_prompt_injection_detected'"
+            ")",
+            name="ck_audit_events_event_type",
+        ),
+        CheckConstraint(
+            "actor_type IN ('system', 'human', 'ai')",
+            name="ck_audit_events_actor_type",
+        ),
+        CheckConstraint(
+            "source IN ('manual', 'ai', 'api', 'system')",
+            name="ck_audit_events_source",
+        ),
+        CheckConstraint(
+            "status IN ('success', 'rejected', 'failed', 'info')",
+            name="ck_audit_events_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    event_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    actor_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    actor_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    document_id: Mapped[int | None] = mapped_column(
+        ForeignKey("documents.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    review_task_id: Mapped[int | None] = mapped_column(
+        ForeignKey("review_tasks.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    source: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    summary: Mapped[str] = mapped_column(String(500), nullable=False)
+    event_metadata: Mapped[dict[str, Any] | None] = mapped_column(
+        "metadata",
+        JSON,
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        index=True,
+    )

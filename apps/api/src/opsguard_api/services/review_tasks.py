@@ -4,6 +4,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from opsguard_api.models import (
+    AuditActorType,
+    AuditEventSource,
+    AuditEventStatus,
+    AuditEventType,
     Document,
     DocumentChunk,
     ReviewTask,
@@ -11,7 +15,12 @@ from opsguard_api.models import (
     ReviewTaskSource,
     ReviewTaskStatus,
 )
-from opsguard_api.schemas import ReviewTaskCreate, ReviewTaskUpdate
+from opsguard_api.schemas import (
+    AuditEventCreateInternal,
+    ReviewTaskCreate,
+    ReviewTaskUpdate,
+)
+from opsguard_api.services import audit_events as audit_events_service
 
 
 class ReviewTaskError(Exception):
@@ -26,6 +35,7 @@ def create_review_task(db: Session, task_in: ReviewTaskCreate) -> ReviewTask:
         db=db,
         task_in=task_in,
         source=ReviewTaskSource.MANUAL,
+        audit_manual_creation=True,
     )
 
 
@@ -44,6 +54,7 @@ def _create_review_task(
     db: Session,
     task_in: ReviewTaskCreate,
     source: ReviewTaskSource,
+    audit_manual_creation: bool = False,
 ) -> ReviewTask:
     _get_document_or_raise(db, task_in.document_id)
     _validate_chunk_reference(
@@ -63,6 +74,32 @@ def _create_review_task(
     )
 
     db.add(task)
+    db.flush()
+
+    if audit_manual_creation:
+        audit_events_service.create_audit_event(
+            db=db,
+            event_in=AuditEventCreateInternal(
+                event_type=AuditEventType.REVIEW_TASK_CREATED,
+                actor_type=AuditActorType.HUMAN,
+                actor_id=None,
+                document_id=task.document_id,
+                review_task_id=task.id,
+                source=AuditEventSource.MANUAL,
+                status=AuditEventStatus.SUCCESS,
+                summary=(
+                    "Manual review task created "
+                    f"for document {task.document_id}."
+                ),
+                metadata={
+                    "chunk_id": task.chunk_id,
+                    "severity": task.severity,
+                    "task_status": task.status,
+                },
+            ),
+            commit=False,
+        )
+
     db.commit()
     db.refresh(task)
 
@@ -120,9 +157,30 @@ def update_review_task(
 
 def dismiss_review_task(db: Session, task_id: int) -> ReviewTask:
     task = get_review_task(db, task_id)
+    previous_status = task.status
     task.status = ReviewTaskStatus.DISMISSED.value
 
     db.add(task)
+    db.flush()
+    audit_events_service.create_audit_event(
+        db=db,
+        event_in=AuditEventCreateInternal(
+            event_type=AuditEventType.REVIEW_TASK_DISMISSED,
+            actor_type=AuditActorType.HUMAN,
+            actor_id=None,
+            document_id=task.document_id,
+            review_task_id=task.id,
+            source=AuditEventSource.MANUAL,
+            status=AuditEventStatus.SUCCESS,
+            summary=f"Review task {task.id} dismissed.",
+            metadata={
+                "previous_status": previous_status,
+                "new_status": task.status,
+            },
+        ),
+        commit=False,
+    )
+
     db.commit()
     db.refresh(task)
 

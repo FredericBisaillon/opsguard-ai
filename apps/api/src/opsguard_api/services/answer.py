@@ -4,7 +4,14 @@ from sqlalchemy.orm import Session
 
 from opsguard_api.config import Settings
 from opsguard_api.constants import ANSWER_ABSTENTION_MESSAGE
-from opsguard_api.schemas import AnswerRequest
+from opsguard_api.models import (
+    AuditActorType,
+    AuditEventSource,
+    AuditEventStatus,
+    AuditEventType,
+)
+from opsguard_api.schemas import AnswerRequest, AuditEventCreateInternal
+from opsguard_api.services import audit_events as audit_events_service
 from opsguard_api.services import retrieval
 from opsguard_api.services import search as search_service
 from opsguard_api.services.embeddings import EmbeddingClient
@@ -89,6 +96,13 @@ def answer_question(
         )
     except search_service.SemanticSearchError as exc:
         raise AnswerError(exc.message, status_code=exc.status_code) from exc
+
+    _audit_prompt_injection_signals(
+        db=db,
+        context=context,
+        requested_document_id=answer_in.document_id,
+        model=llm_client.model,
+    )
 
     if not context.sources:
         return _abstained_response(
@@ -229,4 +243,56 @@ def _abstained_response(
         is_answered=False,
         citations=[],
         retrieved_chunk_count=retrieved_chunk_count,
+    )
+
+
+def _audit_prompt_injection_signals(
+    *,
+    db: Session,
+    context: retrieval.RetrievalContextData,
+    requested_document_id: int | None,
+    model: str,
+) -> None:
+    signal_sources = [
+        source for source in context.sources if source.prompt_injection_signals
+    ]
+    if not signal_sources:
+        return
+
+    security_warnings = sorted(
+        {
+            signal
+            for source in signal_sources
+            for signal in source.prompt_injection_signals
+        }
+    )
+    document_ids = sorted({source.document_id for source in signal_sources})
+    audit_document_id = requested_document_id
+    if audit_document_id is None and len(document_ids) == 1:
+        audit_document_id = document_ids[0]
+
+    audit_events_service.create_audit_event(
+        db=db,
+        event_in=AuditEventCreateInternal(
+            event_type=AuditEventType.RAG_PROMPT_INJECTION_DETECTED,
+            actor_type=AuditActorType.SYSTEM,
+            actor_id=None,
+            document_id=audit_document_id,
+            review_task_id=None,
+            source=AuditEventSource.SYSTEM,
+            status=AuditEventStatus.INFO,
+            summary="Prompt injection signals detected during RAG answer generation.",
+            metadata={
+                "flow": "answer",
+                "model": model,
+                "security_warnings": security_warnings,
+                "source_ids": [source.source_id for source in signal_sources],
+                "document_ids": document_ids,
+                "chunk_ids": [source.chunk_id for source in signal_sources],
+                "signal_count": sum(
+                    len(source.prompt_injection_signals)
+                    for source in signal_sources
+                ),
+            },
+        ),
     )

@@ -1,8 +1,13 @@
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from opsguard_api.models import (
+    AuditActorType,
+    AuditEventSource,
+    AuditEventStatus,
+    AuditEventType,
     DocumentStatus,
     ReviewTaskSeverity,
     ReviewTaskSource,
@@ -153,6 +158,45 @@ class ReviewTaskRead(BaseModel):
     source: ReviewTaskSource
     created_at: datetime
     updated_at: datetime
+
+
+class AuditEventCreateInternal(BaseModel):
+    event_type: AuditEventType
+    actor_type: AuditActorType
+    actor_id: str | None = Field(default=None, max_length=255)
+    document_id: int | None = Field(default=None, gt=0)
+    review_task_id: int | None = Field(default=None, gt=0)
+    source: AuditEventSource
+    status: AuditEventStatus
+    summary: str = Field(min_length=1, max_length=500)
+    metadata: dict[str, Any] | None = None
+
+    @field_validator("summary")
+    @classmethod
+    def summary_must_not_be_blank(cls, value: str) -> str:
+        summary = value.strip()
+        if not summary:
+            raise ValueError("Summary cannot be empty.")
+        return summary
+
+
+class AuditEventRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    event_type: AuditEventType
+    actor_type: AuditActorType
+    actor_id: str | None
+    document_id: int | None
+    review_task_id: int | None
+    source: AuditEventSource
+    status: AuditEventStatus
+    summary: str
+    metadata: dict[str, Any] | None = Field(
+        default=None,
+        validation_alias="event_metadata",
+    )
+    created_at: datetime
 
 
 class ReviewTaskSuggestionRequest(BaseModel):

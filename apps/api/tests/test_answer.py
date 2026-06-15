@@ -1,5 +1,6 @@
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -14,7 +15,13 @@ from opsguard_api.constants import (
 from opsguard_api.db import SessionLocal, init_database
 from opsguard_api.dependencies import get_embedding_client, get_llm_client
 from opsguard_api.main import app
-from opsguard_api.models import Document, DocumentChunk, DocumentStatus
+from opsguard_api.models import (
+    AuditEvent,
+    AuditEventType,
+    Document,
+    DocumentChunk,
+    DocumentStatus,
+)
 from opsguard_api.services.embeddings import EmbeddingProviderError
 from opsguard_api.services.llm import LLMAnswerData, LLMMessage, LLMProviderError
 
@@ -85,6 +92,7 @@ def vector(first: float, second: float = 0.0) -> list[float]:
 
 def delete_answer_documents() -> None:
     with SessionLocal() as db:
+        db.execute(delete(AuditEvent))
         document_ids = list(
             db.scalars(
                 select(Document.id).where(
@@ -95,6 +103,22 @@ def delete_answer_documents() -> None:
         if document_ids:
             db.execute(delete(Document).where(Document.id.in_(document_ids)))
         db.commit()
+
+
+def list_audit_events_for_document(document_id: int) -> list[AuditEvent]:
+    with SessionLocal() as db:
+        return list(
+            db.scalars(
+                select(AuditEvent)
+                .where(AuditEvent.document_id == document_id)
+                .order_by(AuditEvent.id)
+            ).all()
+        )
+
+
+def audit_metadata(event: AuditEvent) -> dict[str, Any]:
+    assert event.event_metadata is not None
+    return event.event_metadata
 
 
 def create_answer_document(
@@ -275,6 +299,20 @@ def test_answer_marks_prompt_injection_signals_and_redacts_secrets(
     assert "OPENAI_API_KEY=demo-secret-token" not in citation_excerpt
     assert "OPENAI_API_KEY=[REDACTED_SECRET]" in prompt
     assert "OPENAI_API_KEY=[REDACTED_SECRET]" in citation_excerpt
+
+    audit_events = list_audit_events_for_document(document_id)
+    assert len(audit_events) == 1
+    assert audit_events[0].event_type == (
+        AuditEventType.RAG_PROMPT_INJECTION_DETECTED.value
+    )
+    metadata = audit_metadata(audit_events[0])
+    assert metadata["flow"] == "answer"
+    assert metadata["security_warnings"] == [
+        "ignore_previous_instructions",
+        "secret_exfiltration",
+        "system_prompt_exfiltration",
+    ]
+    assert "OPENAI_API_KEY=demo-secret-token" not in str(metadata)
 
 
 def test_answer_abstains_without_retrieved_chunks(

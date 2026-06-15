@@ -1,6 +1,6 @@
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
-from typing import cast
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
@@ -14,6 +14,8 @@ from opsguard_api.db import SessionLocal, init_database
 from opsguard_api.dependencies import get_embedding_client, get_llm_client
 from opsguard_api.main import app
 from opsguard_api.models import (
+    AuditEvent,
+    AuditEventType,
     Document,
     DocumentChunk,
     DocumentStatus,
@@ -112,6 +114,7 @@ def valid_tool_arguments(document_id: int, chunk_id: int) -> dict[str, object]:
 
 def delete_ai_review_documents() -> None:
     with SessionLocal() as db:
+        db.execute(delete(AuditEvent))
         document_ids = list(
             db.scalars(
                 select(Document.id).where(
@@ -159,6 +162,22 @@ def create_ai_review_document(
             document_id=document.id,
             chunk_ids=[chunk.id for chunk in saved_chunks],
         )
+
+
+def list_audit_events_for_document(document_id: int) -> list[AuditEvent]:
+    with SessionLocal() as db:
+        return list(
+            db.scalars(
+                select(AuditEvent)
+                .where(AuditEvent.document_id == document_id)
+                .order_by(AuditEvent.id)
+            ).all()
+        )
+
+
+def audit_metadata(event: AuditEvent) -> dict[str, Any]:
+    assert event.event_metadata is not None
+    return event.event_metadata
 
 
 def list_review_tasks_for_document(document_id: int) -> list[ReviewTask]:
@@ -242,6 +261,50 @@ def test_ai_review_returns_no_suggestion_without_relevant_chunks(
     assert fake_embedding.calls == []
     assert fake_llm.calls == []
 
+    audit_events = list_audit_events_for_document(document.document_id)
+    assert len(audit_events) == 1
+    assert audit_events[0].event_type == AuditEventType.AI_REVIEW_NO_SUGGESTION.value
+    assert audit_events[0].status == "info"
+    assert audit_metadata(audit_events[0])["reason"] == "no_relevant_chunks"
+
+
+def test_ai_review_audits_no_suggestion_without_tool_call(
+    ai_review_settings: Settings,
+) -> None:
+    document = create_ai_review_document(
+        [
+            AIReviewChunkInput(
+                content="The policy already defines escalation timelines.",
+                embedding=vector(1.0, 0.0),
+            )
+        ]
+    )
+    fake_embedding = FakeAIReviewEmbeddingClient(embedding=vector(1.0, 0.0))
+    fake_llm = FakeAIReviewLLMClient(response=None)
+    app.dependency_overrides[get_embedding_client] = lambda: fake_embedding
+    app.dependency_overrides[get_llm_client] = lambda: fake_llm
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/ai/review-tasks/suggest",
+            json={
+                "query": "Create a task only if evidence supports it.",
+                "document_id": document.document_id,
+            },
+        )
+
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["suggested"] is False
+    assert payload["created"] is False
+    assert len(fake_llm.calls) == 1
+
+    audit_events = list_audit_events_for_document(document.document_id)
+    assert len(audit_events) == 1
+    assert audit_events[0].event_type == AuditEventType.AI_REVIEW_NO_SUGGESTION.value
+    assert audit_metadata(audit_events[0])["reason"] == "no_supported_tool_call"
+
 
 def test_ai_review_returns_valid_suggestion_without_creating_task(
     ai_review_settings: Settings,
@@ -314,6 +377,13 @@ def test_ai_review_returns_valid_suggestion_without_creating_task(
     assert "----- BEGIN RETRIEVED SOURCES -----" in prompt_messages[1].content
     assert f"chunk_id: {chunk_id}" in prompt_messages[1].content
 
+    audit_events = list_audit_events_for_document(document.document_id)
+    assert len(audit_events) == 1
+    assert audit_events[0].event_type == AuditEventType.AI_REVIEW_TASK_SUGGESTED.value
+    metadata = audit_metadata(audit_events[0])
+    assert metadata["suggestion"]["chunk_id"] == chunk_id
+    assert "embedding" not in metadata
+
 
 def test_ai_review_auto_create_persists_ai_suggested_task(
     ai_review_settings: Settings,
@@ -357,6 +427,18 @@ def test_ai_review_auto_create_persists_ai_suggested_task(
     assert task["source"] == "ai_suggested"
     assert len(persisted_tasks) == 1
     assert persisted_tasks[0].source == ReviewTaskSource.AI_SUGGESTED.value
+
+    audit_events = list_audit_events_for_document(document.document_id)
+    event_types = [event.event_type for event in audit_events]
+    assert AuditEventType.AI_REVIEW_TASK_SUGGESTED.value in event_types
+    assert AuditEventType.AI_REVIEW_TASK_CREATED.value in event_types
+    created_event = next(
+        event
+        for event in audit_events
+        if event.event_type == AuditEventType.AI_REVIEW_TASK_CREATED.value
+    )
+    assert created_event.review_task_id == task["id"]
+    assert audit_metadata(created_event)["created_task_id"] == task["id"]
 
 
 def test_ai_review_rejects_chunk_not_in_retrieved_sources(
@@ -406,6 +488,15 @@ def test_ai_review_rejects_chunk_not_in_retrieved_sources(
     )
     assert list_review_tasks_for_document(first_document.document_id) == []
 
+    audit_events = list_audit_events_for_document(first_document.document_id)
+    assert len(audit_events) == 1
+    assert audit_events[0].event_type == AuditEventType.AI_REVIEW_TASK_REJECTED.value
+    assert audit_events[0].status == "rejected"
+    assert (
+        audit_metadata(audit_events[0])["validation_error"]
+        == "LLM referenced a chunk that was not provided in the retrieved sources."
+    )
+
 
 def test_ai_review_rejects_invalid_severity_from_llm(
     ai_review_settings: Settings,
@@ -436,6 +527,13 @@ def test_ai_review_rejects_invalid_severity_from_llm(
 
     assert response.status_code == 502
     assert response.json()["detail"] == (
+        "LLM tool arguments failed backend validation."
+    )
+
+    audit_events = list_audit_events_for_document(document.document_id)
+    assert len(audit_events) == 1
+    assert audit_events[0].event_type == AuditEventType.AI_REVIEW_TASK_REJECTED.value
+    assert audit_metadata(audit_events[0])["validation_error"] == (
         "LLM tool arguments failed backend validation."
     )
 
@@ -553,6 +651,20 @@ def test_ai_review_prompt_hardens_against_prompt_injection(
     assert "OPENAI_API_KEY=demo-secret-token" not in user_prompt
     assert "OPENAI_API_KEY=[REDACTED_SECRET]" in user_prompt
 
+    audit_events = list_audit_events_for_document(document.document_id)
+    prompt_injection_event = next(
+        event
+        for event in audit_events
+        if event.event_type == AuditEventType.RAG_PROMPT_INJECTION_DETECTED.value
+    )
+    metadata = audit_metadata(prompt_injection_event)
+    assert metadata["security_warnings"] == [
+        "ignore_previous_instructions",
+        "secret_exfiltration",
+        "system_prompt_exfiltration",
+    ]
+    assert "OPENAI_API_KEY=demo-secret-token" not in str(metadata)
+
 
 def test_ai_review_service_reuses_retrieval_service(
     monkeypatch: pytest.MonkeyPatch,
@@ -595,6 +707,11 @@ def test_ai_review_service_reuses_retrieval_service(
         ai_review.retrieval,
         "retrieve_answer_context",
         fake_retrieve_answer_context,
+    )
+    monkeypatch.setattr(
+        ai_review.audit_events_service,
+        "create_audit_event",
+        _noop_create_audit_event,
     )
 
     response = ai_review.suggest_review_task(
@@ -676,6 +793,11 @@ def test_ai_review_service_reuses_review_task_service(
         "create_ai_suggested_review_task",
         fake_create_ai_suggested_review_task,
     )
+    monkeypatch.setattr(
+        ai_review.audit_events_service,
+        "create_audit_event",
+        _noop_create_audit_event,
+    )
 
     response = ai_review.suggest_review_task(
         db=cast(Session, object()),
@@ -700,3 +822,7 @@ def test_ai_review_service_reuses_review_task_service(
             severity=ReviewTaskSeverity.MEDIUM,
         )
     ]
+
+
+def _noop_create_audit_event(*args: object, **kwargs: object) -> None:
+    return None
